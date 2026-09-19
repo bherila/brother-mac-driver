@@ -47,9 +47,16 @@ extension PxlTool {
                     + "interface \(number("bInterfaceNumber") ?? 0)",
                 to: FileHandle.standardOutput)
 
+            let interface: IOUSBHostInterface
             do {
-                let interface = try IOUSBHostInterface(__ioService: service, options: [], queue: nil, interestHandler: nil)
-                defer { interface.destroy() }
+                interface = try IOUSBHostInterface(__ioService: service, options: [], queue: nil, interestHandler: nil)
+            } catch {
+                write("  could not open the interface: \(error.localizedDescription) (is a print job running?)", to: FileHandle.standardOutput)
+                continue
+            }
+            defer { interface.destroy() }
+
+            do {
 
                 let deviceID = try readDeviceID(interface, interfaceNumber: UInt16(number("bInterfaceNumber") ?? 0))
                 write("  device id: \(showSerial ? deviceID : DeviceID.redactingSerial(deviceID))", to: FileHandle.standardOutput)
@@ -69,7 +76,7 @@ extension PxlTool {
                     }
                 }
             } catch {
-                write("  could not open the interface: \(error.localizedDescription) (is a print job running?)", to: FileHandle.standardOutput)
+                write("  query failed: \(error.localizedDescription)", to: FileHandle.standardOutput)
             }
         }
         if found == 0 {
@@ -87,6 +94,11 @@ extension PxlTool {
         guard bytes.count >= 2 else { return "" }
         let length = Int(bytes[0]) << 8 | Int(bytes[1])
         return String(decoding: bytes.dropFirst(2).prefix(max(0, length - 2)), as: UTF8.self)
+    }
+
+    private static func isTimeout(_ error: NSError) -> Bool {
+        // kIOReturnTimeout and kIOUSBTransactionTimeout, as the signed 32-bit values IOKit reports.
+        [Int(Int32(bitPattern: 0xE000_02D6)), Int(Int32(bitPattern: 0xE000_4051))].contains(error.code)
     }
 
     /// One alternate setting of the interface that carries raw print data.
@@ -158,11 +170,14 @@ extension PxlTool {
         while Date() < deadline {
             guard let buffer = NSMutableData(length: 4096) else { break }
             var received = 0
-            // A timeout just means the printer has nothing more to say.
-            guard (try? back.__sendIORequest(with: buffer, bytesTransferred: &received, completionTimeout: 1.5)) != nil, received > 0 else {
+            do {
+                try back.__sendIORequest(with: buffer, bytesTransferred: &received, completionTimeout: 1.5)
+            } catch let error as NSError where isTimeout(error) {
+                // Nothing (more) to read within the window. Once something has arrived, that is the end.
                 if !reply.isEmpty { break }
                 continue
             }
+            // Any other error (a stalled or aborted pipe) is a finding in itself, not silence.
             reply.append((buffer as Data).prefix(received))
         }
         return reply.isEmpty ? "(no reply)" : String(decoding: reply, as: UTF8.self).replacingOccurrences(of: "\r", with: "").replacingOccurrences(of: "\u{0C}", with: "")
