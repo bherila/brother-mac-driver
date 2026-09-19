@@ -38,7 +38,7 @@ public enum PPDGenerator {
         out += ""
 
         pageSizes(&out, model)
-        resolution(&out)
+        resolution(&out, model)
         if model.color { colorModel(&out) }
         if model.duplex { duplex(&out) }
         pickOne(
@@ -48,19 +48,21 @@ public enum PPDGenerator {
             &out, keyword: "BRTonerSaveMode", title: "Toner Save Mode", defaultChoice: "OFF",
             choices: [("OFF", "Off", ""), ("ON", "On", "")])
 
-        out += "*OpenGroup: Advanced/Advanced"
-        out += ""
-        pickOne(
-            &out, keyword: "BRCompression", title: "Data Compression", defaultChoice: "RLE",
-            choices: [("RLE", "Standard (RLE)", ""), ("DeltaRow", "Smaller (Delta Row)", "")])
-        pickOne(
-            &out, keyword: "BRPJL", title: "Brother Job Settings (PJL)", defaultChoice: "ON",
-            choices: [("ON", "Send", ""), ("OFF", "Do Not Send", "")])
-        pickOne(
-            &out, keyword: "BRErrorPage", title: "Print Error Report Page", defaultChoice: "OFF",
-            choices: [("OFF", "Off", ""), ("ON", "On", "")])
-        out += "*CloseGroup: Advanced"
-        out += ""
+        if model.backend == .pclxl {
+            out += "*OpenGroup: Advanced/Advanced"
+            out += ""
+            pickOne(
+                &out, keyword: "BRCompression", title: "Data Compression", defaultChoice: "RLE",
+                choices: [("RLE", "Standard (RLE)", ""), ("DeltaRow", "Smaller (Delta Row)", "")])
+            pickOne(
+                &out, keyword: "BRPJL", title: "Brother Job Settings (PJL)", defaultChoice: "ON",
+                choices: [("ON", "Send", ""), ("OFF", "Do Not Send", "")])
+            pickOne(
+                &out, keyword: "BRErrorPage", title: "Print Error Report Page", defaultChoice: "OFF",
+                choices: [("OFF", "Off", ""), ("ON", "On", "")])
+            out += "*CloseGroup: Advanced"
+            out += ""
+        }
 
         out += "*DefaultFont: Courier"
         out += "*Font Courier: Standard \"(1.05)\" Standard ROM"
@@ -100,10 +102,13 @@ public enum PPDGenerator {
         out += ""
     }
 
-    private static func resolution(_ out: inout Lines) {
+    private static func resolution(_ out: inout Lines, _ model: PrinterModel) {
+        // A mono model has no ColorModel option, so its raster format rides on the resolution:
+        // cupsColorSpace 3 = black, one bit per pixel, 1 = toner.
+        let format = model.color ? "" : "/cupsColorSpace 3/cupsColorOrder 0/cupsBitsPerColor 1"
         pickOne(
             &out, keyword: "Resolution", title: "Resolution", defaultChoice: "600dpi",
-            choices: [("600dpi", "600 dpi", "<</HWResolution[600 600]>>setpagedevice")])
+            choices: [("600dpi", "600 dpi", "<</HWResolution[600 600]\(format)>>setpagedevice")])
     }
 
     private static func colorModel(_ out: inout Lines) {

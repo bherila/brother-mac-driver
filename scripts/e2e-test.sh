@@ -43,6 +43,9 @@ cases=(
     "MFC-9330CDW|tray-tonersave|--gray yes|InputSlot=Tray1 BRTonerSaveMode=ON|ECONOMODE=ON|gray8"
     "MFC-9330CDW|envelope|--size EnvDL --gray yes|PageSize=EnvDL InputSlot=Manual|MediaSource=manualFeed(2)|gray8"
     "MFC-9330CDW|custom-size|--size 3x5 --gray yes|PageSize=3x5|CustomMediaSize=[762, 1270]|gray8"
+    "HL-2140-series|mono|--pages 2 --gray yes||@PJL SET PAPER = LETTER|black1"
+    "HL-2140-series|mono-a4-tray|--size A4 --gray yes|PageSize=A4 InputSlot=Tray1 BRTonerSaveMode=ON|@PJL SET SOURCETRAY = T1|black1"
+    "HL-2140-series|mono-colour-input|--pages 1|PageSize=Legal|@PJL SET PAPER = LEGAL|black1"
 )
 
 failures=0
@@ -61,15 +64,21 @@ for entry in "${cases[@]}"; do
 
     PPD="$ppd" "$filter" 1 e2e "$name" 1 "$job_options" "$work/$name.ras" >"$work/$name.pxl" 2>"$work/$name.filter.log"
 
-    "$pxltool" dump "$work/$name.pxl" >"$work/$name.dump"
-    if ! grep -qF -- "$expect_dump" "$work/$name.dump"; then
+    # PCL XL jobs are checked through their disassembly; the mono format is mostly text up front.
+    if [[ "$expect_format" == black1 ]]; then
+        # head first: cutting a pipe short would fail the pipeline under pipefail.
+        head -c 2000 "$work/$name.pxl" | LC_ALL=C tr -d '\000' >"$work/$name.dump"
+    else
+        "$pxltool" dump "$work/$name.pxl" >"$work/$name.dump"
+    fi
+    if ! LC_ALL=C grep -qaF -- "$expect_dump" "$work/$name.dump"; then
         echo "FAIL: job does not contain '$expect_dump'" >&2
         failures=$((failures + 1))
     fi
 
     "$pxltool" compare "$work/$name.ras" "$work/$name.pxl" | tee "$work/$name.compare"
     # A blank page (the rasteriser pads duplex jobs to an even page count) carries no images.
-    if grep -v -e ", $expect_format)" -e "(0 images)" "$work/$name.compare" | grep -q .; then
+    if grep -v -e ", $expect_format)" -e " $expect_format identical" -e "(0 images)" "$work/$name.compare" | grep -q .; then
         echo "FAIL: expected every page to be sent as $expect_format" >&2
         failures=$((failures + 1))
     fi

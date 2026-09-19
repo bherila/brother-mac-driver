@@ -38,7 +38,12 @@ extension PxlTool {
         guard arguments.count == 2 else {
             throw ToolError.message("usage: pxltool compare <cups-raster-file> <job-file>")
         }
-        let pages = try PCLXLRenderer.pages(of: try PCLXLReader.parse(try readInput(arguments[1])))
+        let job = try readInput(arguments[1])
+        if BrotherMonoReader.recognizes(job) {
+            try compareMono(rasterPath: arguments[0], job: job)
+            return
+        }
+        let pages = try PCLXLRenderer.pages(of: try PCLXLReader.parse(job))
 
         let descriptor = open(arguments[0], O_RDONLY)
         guard descriptor >= 0, let raster = cupsRasterOpen(descriptor, CUPS_RASTER_READ) else {
@@ -108,6 +113,52 @@ extension PxlTool {
 
         guard index == pages.count else {
             throw ToolError.message("job has \(pages.count) pages, raster has \(index)")
+        }
+    }
+
+    /// The mono format does not record the line width, so the raster is read first to learn it.
+    private static func compareMono(rasterPath: String, job: [UInt8]) throws {
+        let descriptor = open(rasterPath, O_RDONLY)
+        guard descriptor >= 0, let raster = cupsRasterOpen(descriptor, CUPS_RASTER_READ) else {
+            throw ToolError.message("cannot read raster '\(rasterPath)'")
+        }
+        defer {
+            cupsRasterClose(raster)
+            close(descriptor)
+        }
+
+        var expected: [(bytesPerRow: Int, height: Int, pixels: [UInt8])] = []
+        var header = cups_page_header2_t()
+        while cupsRasterReadHeader2(raster, &header) != 0 {
+            guard header.cupsBitsPerPixel == 1 else {
+                throw ToolError.message("page \(expected.count + 1): a mono job needs a 1-bit raster, got \(header.cupsBitsPerPixel)-bit")
+            }
+            var pixels = [UInt8](repeating: 0, count: Int(header.cupsBytesPerLine) * Int(header.cupsHeight))
+            let read = pixels.withUnsafeMutableBytes { buffer in
+                cupsRasterReadPixels(raster, buffer.baseAddress?.assumingMemoryBound(to: UInt8.self), UInt32(buffer.count))
+            }
+            guard Int(read) == pixels.count else {
+                throw ToolError.message("page \(expected.count + 1): raster data ended early")
+            }
+            expected.append((Int(header.cupsBytesPerLine), Int(header.cupsHeight), pixels))
+        }
+        guard !expected.isEmpty else { throw ToolError.message("raster has no pages") }
+
+        let pages = try BrotherMonoReader.pages(of: job, bytesPerRow: expected.map(\.bytesPerRow))
+        guard pages.count == expected.count else {
+            throw ToolError.message("job has \(pages.count) pages, raster has \(expected.count)")
+        }
+        for (index, (page, want)) in zip(pages, expected).enumerated() {
+            guard page.lines.count == want.height else {
+                throw ToolError.message("page \(index + 1): job has \(page.lines.count) lines, raster has \(want.height)")
+            }
+            for (row, line) in page.lines.enumerated() where line[...] != want.pixels[row * want.bytesPerRow..<(row + 1) * want.bytesPerRow] {
+                throw ToolError.message("page \(index + 1): first difference on line \(row)")
+            }
+            write(
+                "page \(index + 1): \(want.bytesPerRow * 8)x\(want.height) black1 identical "
+                    + "(\(page.blockSizes.count) blocks, largest \(page.blockSizes.max() ?? 0) bytes)",
+                to: FileHandle.standardOutput)
         }
     }
 }

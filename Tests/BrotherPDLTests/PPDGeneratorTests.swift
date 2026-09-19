@@ -87,4 +87,39 @@ import Testing
         #expect(opened == closed && opened > 5)
         #expect(ppd.hasPrefix("*PPD-Adobe: \"4.3\"\n"))
     }
+
+    // MARK: Mono models
+
+    var monoLines: [Substring] {
+        PPDGenerator.ppd(for: PrinterModel.named("HL-2140")!).split(separator: "\n", omittingEmptySubsequences: false)
+    }
+
+    @Test func monoModelIsFoundWithOrWithoutSeries() {
+        #expect(PrinterModel.named("HL-2140 series")?.backend == .mono)
+        #expect(PrinterModel.named("hl-2140")?.name == "HL-2140 series")
+    }
+
+    @Test func monoPPDIdentityAndFileNames() {
+        let model = PrinterModel.named("HL-2140")!
+        #expect(model.ppdBaseName == "Brother-HL-2140-series")
+        #expect(PPDGenerator.pcFileName(model) == "BRHL2140.PPD")
+        #expect(monoLines.contains("*1284DeviceID: \"MFG:Brother;MDL:HL-2140 series;\""))
+        #expect(monoLines.contains("*BRBackend: \"mono\""))
+        #expect(monoLines.contains("*ColorDevice: False"))
+    }
+
+    @Test func monoPPDRequestsOneBitBlackAndOffersNoColourOrPCLXLOptions() {
+        let resolution = monoLines.first { $0.hasPrefix("*Resolution 600dpi/") }.map(String.init) ?? ""
+        #expect(resolution.hasSuffix("\"<</HWResolution[600 600]/cupsColorSpace 3/cupsColorOrder 0/cupsBitsPerColor 1>>setpagedevice\""))
+        for keyword in ["ColorModel", "Duplex", "BRCompression", "BRPJL", "BRErrorPage"] {
+            let offered = monoLines.contains { $0.hasPrefix("*OpenUI *\(keyword)/") }
+            #expect(!offered, "\(keyword)")
+        }
+    }
+
+    @Test func monoPPDUsesItsOwnMarginsAndSizeList() {
+        #expect(monoLines.contains("*ImageableArea Letter/US Letter: \"8 8 604 776\""))
+        let sizes = monoLines.filter { $0.hasPrefix("*PageSize ") }.compactMap { $0.dropFirst(10).split(separator: "/").first.map(String.init) }
+        #expect(sizes == ["A4", "Letter", "Legal", "Executive", "A5", "A6", "B5", "B6", "EnvDL", "EnvC5", "EnvMonarch"])
+    }
 }

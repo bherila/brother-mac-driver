@@ -47,6 +47,9 @@ func run() throws -> Int32 {
     case "pclxl":
         var backend = PCLXLBackend(options: options)
         try printJob(raster, firstHeader: header, with: &backend)
+    case "mono":
+        var backend = BrotherMonoBackend(options: options)
+        try printJob(raster, firstHeader: header, with: &backend)
     default:
         throw FilterError("Unknown backend \"\(backendName)\" in PPD")
     }
