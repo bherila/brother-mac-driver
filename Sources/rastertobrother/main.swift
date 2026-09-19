@@ -60,6 +60,7 @@ func printJob(_ raster: OpaquePointer, firstHeader: cups_page_header2_t, with ba
 
     try backend.beginJob(to: &sink)
     var page = 0
+    var endedEarly = false
     var row: [UInt8] = []
     pages: repeat {
         page += 1
@@ -76,8 +77,8 @@ func printJob(_ raster: OpaquePointer, firstHeader: cups_page_header2_t, with ba
         for _ in 0..<geometry.height {
             if Cancellation.isCancelled { break pages }
             guard cupsRasterReadPixels(raster, &row, header.cupsBytesPerLine) == header.cupsBytesPerLine else {
-                // Finish cleanly with what we have rather than wedging the printer mid-page.
-                Log.error("Raster data ended early on page \(page)")
+                // Close the job cleanly rather than wedging the printer mid-page, then report the failure.
+                endedEarly = true
                 break pages
             }
             try row.withUnsafeBytes { try backend.writeRow($0, to: &sink) }
@@ -93,6 +94,10 @@ func printJob(_ raster: OpaquePointer, firstHeader: cups_page_header2_t, with ba
     try backend.endJob(to: &sink)
     try sink.flush()
     Log.debug("sent \(sink.bytesWritten) bytes for \(page) page(s)")
+    // A rasteriser that died upstream must not look like a job that printed in full.
+    if endedEarly && !Cancellation.isCancelled {
+        throw FilterError("Raster data ended early on page \(page); the job is incomplete")
+    }
     Log.info("Ready to print.")
 }
 

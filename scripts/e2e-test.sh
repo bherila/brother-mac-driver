@@ -77,13 +77,24 @@ for entry in "${cases[@]}"; do
     echo "   $(wc -c <"$work/$name.ras" | tr -d ' ') raster bytes -> $(wc -c <"$work/$name.pxl" | tr -d ' ') job bytes"
 done
 
-# Input that stops mid-page (what a cancelled job looks like to the filter): the job must still be
-# well-formed, stop without finishing the page, and end on a UEL so the printer drops the partial page.
+ends_with_uel() {
+    [[ "$(tail -c 9 "$1" | xxd -p)" == "1b252d313233343558" ]]
+}
+
+# Input that stops mid-page: the job must still be well-formed, must not finish the page it never
+# fully received, must end on a UEL so the printer drops the partial page — and the filter must
+# report failure, or a rasteriser that died would look like a successful job with a page missing.
 echo "== truncated"
+ppd="$work/ppd/Brother-MFC-9330CDW.ppd"
 head -c 60000000 "$work/colour.ras" >"$work/truncated.ras"
-PPD="$work/ppd/Brother-MFC-9330CDW.ppd" "$filter" 1 e2e truncated 1 "" "$work/truncated.ras" >"$work/truncated.pxl" 2>"$work/truncated.filter.log"
+status=0
+PPD="$ppd" "$filter" 1 e2e truncated 1 "" "$work/truncated.ras" >"$work/truncated.pxl" 2>"$work/truncated.filter.log" || status=$?
 "$pxltool" dump "$work/truncated.pxl" >"$work/truncated.dump"
-if [[ "$(tail -c 9 "$work/truncated.pxl" | xxd -p)" != "1b252d313233343558" ]]; then
+if ((status == 0)); then
+    echo "FAIL: truncated input was reported as a successful job" >&2
+    failures=$((failures + 1))
+fi
+if ! ends_with_uel "$work/truncated.pxl"; then
     echo "FAIL: truncated job does not end with a UEL" >&2
     failures=$((failures + 1))
 fi
