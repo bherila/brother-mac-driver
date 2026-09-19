@@ -26,6 +26,7 @@ can drive it. Serial numbers are left out of the output, so it is safe to paste 
 | Model | Language | Status |
 |---|---|---|
 | MFC-9330CDW | PCL XL | untested on hardware |
+| HL-2140 series | Brother host-based mono | untested on hardware |
 
 Other Brother colour lasers that accept PCL XL (PCL 6) — the probe says so — should be easy to add.
 Models that only accept Brother's host-based XL2HB language are not supported.
@@ -58,7 +59,7 @@ app → PDF → cgpdftoraster (macOS) → rastertobrother (this project) → USB
 
 | Target | Role |
 |---|---|
-| `BrotherPDL` | Pure-Swift encoders for the printer languages (PCL XL today), the PPD generator, and a PCL XL reader used to check the encoder. No CUPS dependency. |
+| `BrotherPDL` | Pure-Swift encoders for the printer languages (PCL XL, and Brother's host-based mono format as documented by the brlaser project), the PPD generator, and readers for both formats used to check the encoders. No CUPS dependency. |
 | `rastertobrother` | The CUPS filter: reads CUPS raster, writes printer data. |
 | `pxltool` | Developer tool: `dump` and `render` a print job, `compare` a job against the raster it came from, generate the `ppd` files, and draw a calibration `testpdf`. |
 | `CCUPS`, `CCUPSShim` | Module map for the `libcups` that ships with macOS, and C wrappers for its PPD API (which Swift cannot call directly). |
@@ -85,5 +86,9 @@ Requires Xcode 26 or later.
 ## Licence
 
 GPL-2.0-or-later. See [LICENSE](LICENSE).
+
+The mono-laser line and block encoding is a Swift port of the encoder in
+[brlaser](https://github.com/pdewacht/brlaser) (Copyright 2013 Peter De Wachter, GPL-2.0-or-later),
+which worked the format out.
 
 This project is not affiliated with or endorsed by Brother Industries, Ltd.
