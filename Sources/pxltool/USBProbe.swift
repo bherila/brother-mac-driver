@@ -35,8 +35,9 @@ extension PxlTool {
                     IOOptionBits(kIORegistryIterateRecursively | kIORegistryIterateParents))
             }
             func number(_ key: String) -> Int? { (property(key) as? NSNumber)?.intValue }
-            // Interface class 7 is "printer".
-            guard number("bInterfaceClass") == 7 else { continue }
+            // Interface class 7 is "printer". Protocol 4 is IPP-over-USB: the same printer again, behind
+            // HTTP, which must neither be listed as a second printer nor be sent raw PJL.
+            guard number("bInterfaceClass") == 7, number("bInterfaceProtocol") != 4 else { continue }
             found += 1
 
             let vendor = number("idVendor") ?? 0
@@ -54,9 +55,14 @@ extension PxlTool {
                 write("  device id: \(showSerial ? deviceID : DeviceID.redactingSerial(deviceID))", to: FileHandle.standardOutput)
                 write("  \(DeviceID(deviceID).summary)", to: FileHandle.standardOutput)
 
+                let channels = rawChannels(of: interface)
+                for channel in channels {
+                    write("  \(channel.summary)", to: FileHandle.standardOutput)
+                }
+
                 if queryPJL {
                     if vendor == brotherVendorID {
-                        let reply = try pjlQuery(interface)
+                        let reply = try pjlQuery(interface, channels: channels)
                         write("  PJL replies:\n" + (showSerial ? reply : DeviceID.redactingSerial(reply)).split(separator: "\n").map { "    \($0)" }.joined(separator: "\n"), to: FileHandle.standardOutput)
                     } else {
                         write("  (not a Brother device; PJL queries skipped)", to: FileHandle.standardOutput)
@@ -83,27 +89,65 @@ extension PxlTool {
         return String(decoding: bytes.dropFirst(2).prefix(max(0, length - 2)), as: UTF8.self)
     }
 
-    /// Sends PJL INFO queries on the bulk OUT endpoint and collects what comes back on bulk IN.
-    private static func pjlQuery(_ interface: IOUSBHostInterface) throws -> String {
-        var out: IOUSBHostPipe?
-        var back: IOUSBHostPipe?
-        var endpoint = IOUSBGetNextEndpointDescriptor(interface.configurationDescriptor, interface.interfaceDescriptor, nil)
-        while let descriptor = endpoint {
-            // bmAttributes low two bits: 2 = bulk. Address bit 7: 1 = device-to-host.
-            if descriptor.pointee.bmAttributes & 3 == 2 {
-                let address = Int(descriptor.pointee.bEndpointAddress)
-                if address & 0x80 != 0 {
-                    if back == nil { back = try interface.copyPipe(withAddress: address) }
-                } else if out == nil {
-                    out = try interface.copyPipe(withAddress: address)
-                }
-            }
-            endpoint = IOUSBGetNextEndpointDescriptor(
-                interface.configurationDescriptor, interface.interfaceDescriptor,
-                UnsafeRawPointer(descriptor).assumingMemoryBound(to: IOUSBDescriptorHeader.self))
+    /// One alternate setting of the interface that carries raw print data.
+    struct RawChannel {
+        var alternateSetting: Int
+        /// 1 = one-way, 2 = two-way.
+        var interfaceProtocol: Int
+        var bulkOut: Int?
+        var bulkIn: Int?
+
+        var summary: String {
+            func hex(_ address: Int?) -> String { address.map { "0x" + String($0, radix: 16) } ?? "none" }
+            return "alternate setting \(alternateSetting), protocol \(interfaceProtocol): bulk out \(hex(bulkOut)), bulk in \(hex(bulkIn))"
         }
-        guard let out else { throw ToolError.message("printer has no bulk OUT endpoint") }
-        guard let back else { return "(printer has no bulk IN endpoint: it cannot reply)" }
+    }
+
+    /// Every alternate setting of this interface that speaks the raw printer protocols. Printers
+    /// commonly offer a send-only setting and a two-way one; only the latter can answer.
+    private static func rawChannels(of interface: IOUSBHostInterface) -> [RawChannel] {
+        let configuration = interface.configurationDescriptor
+        let number = interface.interfaceDescriptor.pointee.bInterfaceNumber
+        var channels: [RawChannel] = []
+        var current = IOUSBGetNextInterfaceDescriptor(configuration, nil)
+        while let descriptor = current {
+            let header = UnsafeRawPointer(descriptor).assumingMemoryBound(to: IOUSBDescriptorHeader.self)
+            defer { current = IOUSBGetNextInterfaceDescriptor(configuration, header) }
+            guard descriptor.pointee.bInterfaceNumber == number, descriptor.pointee.bInterfaceClass == 7,
+                [1, 2].contains(descriptor.pointee.bInterfaceProtocol)
+            else { continue }
+
+            var channel = RawChannel(
+                alternateSetting: Int(descriptor.pointee.bAlternateSetting),
+                interfaceProtocol: Int(descriptor.pointee.bInterfaceProtocol))
+            var endpoint = IOUSBGetNextEndpointDescriptor(configuration, descriptor, nil)
+            while let found = endpoint {
+                // bmAttributes low two bits: 2 = bulk. Address bit 7: 1 = device-to-host.
+                if found.pointee.bmAttributes & 3 == 2 {
+                    let address = Int(found.pointee.bEndpointAddress)
+                    if address & 0x80 != 0 { channel.bulkIn = channel.bulkIn ?? address } else { channel.bulkOut = channel.bulkOut ?? address }
+                }
+                endpoint = IOUSBGetNextEndpointDescriptor(
+                    configuration, descriptor, UnsafeRawPointer(found).assumingMemoryBound(to: IOUSBDescriptorHeader.self))
+            }
+            channels.append(channel)
+        }
+        return channels
+    }
+
+    /// Sends PJL INFO queries on a bulk OUT endpoint and collects what comes back on bulk IN, after
+    /// switching to a two-way alternate setting if the current one is send-only.
+    private static func pjlQuery(_ interface: IOUSBHostInterface, channels: [RawChannel]) throws -> String {
+        guard let channel = channels.first(where: { $0.bulkOut != nil && $0.bulkIn != nil }),
+            let outAddress = channel.bulkOut, let inAddress = channel.bulkIn
+        else {
+            return "(no two-way raw channel on this printer: it cannot reply, so nothing was sent)"
+        }
+        if channel.alternateSetting != Int(interface.interfaceDescriptor.pointee.bAlternateSetting) {
+            try interface.selectAlternateSetting(channel.alternateSetting)
+        }
+        let out = try interface.copyPipe(withAddress: outAddress)
+        let back = try interface.copyPipe(withAddress: inAddress)
 
         let query = "\u{1B}%-12345X@PJL\r\n@PJL INFO ID\r\n@PJL INFO CONFIG\r\n@PJL INFO VARIABLES\r\n\u{1B}%-12345X"
         var sent = 0
