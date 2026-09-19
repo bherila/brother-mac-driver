@@ -38,3 +38,12 @@ jobs:
       # PDF -> the system's rasteriser driven by our PPD -> our filter -> decode -> pixel compare.
       - name: End-to-end through the system filter chain
         run: scripts/e2e-test.sh
+
+      - name: Build the installer package (unsigned)
+        run: BUILD_DIR="$PWD/.build/release" scripts/make-pkg.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: brother-mac-driver-pkg
+          path: build/*.pkg
+          if-no-files-found: error
