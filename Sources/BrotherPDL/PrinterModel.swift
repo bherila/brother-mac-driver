@@ -3,6 +3,8 @@ public struct PrinterModel: Sendable, Equatable {
     public enum Backend: String, Sendable {
         /// Colour PCL XL (PCL 6) raster, 8-bit gray or RGB.
         case pclxl
+        /// Brother's host-based mono format, 1-bit black.
+        case mono
     }
 
     /// Unprintable border in points.
@@ -46,6 +48,11 @@ extension PrinterModel {
         PrinterModel(
             name: "MFC-9330CDW", backend: .pclxl, duplex: true, inputSlots: traySlots,
             mediaNames: nil, margins: nil, pagesPerMinute: 22, verified: false),
+        // Sizes and margins as used by the brlaser project for this family.
+        PrinterModel(
+            name: "HL-2140 series", backend: .mono, duplex: false, inputSlots: traySlots,
+            mediaNames: ["A4", "Letter", "Legal", "Executive", "A5", "A6", "B5", "B6", "EnvDL", "EnvC5", "EnvMonarch"],
+            margins: Margins(left: 8, bottom: 8, right: 8, top: 16), pagesPerMinute: 22, verified: false),
     ]
 
     /// Looks a model up by its name, ignoring case and a trailing " series".

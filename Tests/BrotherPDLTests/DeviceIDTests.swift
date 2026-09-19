@@ -11,6 +11,12 @@ import Testing
         #expect(id.summary.contains("supported by this driver (pclxl backend)"))
     }
 
+    @Test func monoModelIsSupportedThroughItsOwnBackend() {
+        let id = DeviceID("MFG:Brother;CMD:PJL,HBP;MDL:HL-2140 series;CLS:PRINTER;")
+        #expect(id.support == .supported(PrinterModel.named("HL-2140")!))
+        #expect(id.summary == "HL-2140 series reports languages: PJL, HBP - supported by this driver (mono backend)")
+    }
+
     @Test func unknownModelThatSpeaksPCLXL() {
         let id = DeviceID("MFG:Brother;CMD:PJL,PCLXL;MDL:HL-9999CDW;")
         #expect(id.support == .speaksPCLXL)
