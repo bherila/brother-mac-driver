@@ -26,6 +26,9 @@ enum PxlTool {
           ppd --out <dir> [--model NAME]    write the driver's PPD files
           testpdf --out <file> [--size NAME] [--pages N] [--gray yes]
                                             write a calibration page as PDF
+          usb-probe [--pjl yes] [--show-serial yes]
+                                            list USB printers, the languages they report, and
+                                            whether this driver supports them
 
         `file` may be omitted or given as `-` to read the job from standard input.
         """
@@ -48,6 +51,8 @@ enum PxlTool {
                 try compare(rest)
             case "testpdf":
                 try testPDF(rest)
+            case "usb-probe":
+                try usbProbe(rest)
             case "-h", "--help", "help":
                 write(usage, to: FileHandle.standardOutput)
             default:
