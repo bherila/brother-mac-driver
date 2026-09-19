@@ -189,6 +189,37 @@ private func samplePage(width: Int, height: Int, colorAt colorRows: Range<Int>?)
         #expect(begin[.customMediaSizeUnits]?.intValue == Int(PCLXLMeasure.tenthsOfAMillimeter.rawValue))
     }
 
+    /// What the macOS rasteriser really delivers for US Letter: only the imageable area
+    /// (612 × 792 pt sheet, 12 pt margins → 4900 × 6400 px at 600 dpi).
+    private func imageableLetterPage() -> TestPage {
+        var page = TestPage(width: 4900, height: 6400, format: .gray8)
+        page.geometry.mediaPoints = .init(width: 612, height: 792)
+        page.geometry.origin = .init(x: 100, y: 100)
+        return page
+    }
+
+    @Test func mediaComesFromTheSheetNotTheRaster() throws {
+        let begin = try beginPages([imageableLetterPage()])[0]
+        #expect(begin[.mediaSize]?.intValue == Int(PCLXLMediaSize.letter.rawValue))
+        #expect(begin[.customMediaSize] == nil)
+    }
+
+    @Test func customMediaComesFromTheSheetNotTheRaster() throws {
+        // 3 × 5 in sheet (216 × 360 pt) with 12 pt margins → 1600 × 2800 px raster.
+        var page = TestPage(width: 1600, height: 2800, format: .gray8)
+        page.geometry.mediaPoints = .init(width: 216, height: 360)
+        page.geometry.origin = .init(x: 100, y: 100)
+        #expect(try beginPages([page])[0][.customMediaSize]?.intArray == [762, 1270])
+    }
+
+    @Test func imagesAreShiftedByTheRasterOrigin() throws {
+        var page = imageableLetterPage()
+        page.fill(x: 0..<2, y: 0..<1, [0])
+        page.fill(x: 4899..<4900, y: 6399..<6400, [0])
+        let images = try decode(try encode([page])).pages[0].images
+        #expect(images.map { [$0.x, $0.y, $0.width, $0.height] } == [[100, 100, 2, 1], [4999, 6499, 1, 1]])
+    }
+
     @Test func explicitMediaWins() throws {
         var options = JobOptions()
         options.media = MediaSize.named("A5")

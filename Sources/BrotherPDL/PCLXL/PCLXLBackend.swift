@@ -2,7 +2,8 @@
 ///
 /// The page is sent as a stack of horizontal bands, each its own image, cropped to the ink it
 /// contains; all-white bands are not sent at all. Coordinates are device pixels: the session's
-/// units-per-measure equals the raster resolution and the origin is the physical page corner.
+/// units-per-measure equals the raster resolution and the origin is the physical sheet corner, so
+/// every image is shifted by the raster's position on the sheet (`PageGeometry.origin`).
 ///
 /// In `.auto` colour mode the gray-or-colour decision is made once per page, never per band, so
 /// that a neutral area can't change rendering (black toner vs. composite black) part-way down a
@@ -17,6 +18,7 @@ public struct PCLXLBackend: PDLBackend {
     private var pagesStarted = 0
 
     private var page: PageState?
+    private var origin = PageGeometry.Origin.zero
     private var colorSpace: PCLXLColorSpace?
     private var compressed: [UInt8] = []
     private var convertedRow: [UInt8] = []
@@ -59,18 +61,17 @@ public struct PCLXLBackend: PDLBackend {
             deciding: geometry.format == .rgb8 && options.colorMode == .auto,
             band: Band(format: bandFormat, width: geometry.width))
         convertedRow = [UInt8](repeating: 0, count: geometry.width)
+        origin = geometry.origin
 
         writer.enumeration(PCLXLOrientation.portrait, .orientation)
-        let media = options.media ?? MediaSize.matching(
-            widthPoints: Double(geometry.width) * 72 / Double(geometry.dpi),
-            heightPoints: Double(geometry.height) * 72 / Double(geometry.dpi))
+        let sheet = geometry.sheetPoints
+        let media = options.media ?? MediaSize.matching(widthPoints: sheet.width, heightPoints: sheet.height)
         if let code = media?.pclxl {
             writer.enumeration(code, .mediaSize)
         } else {
-            // Tenths of a millimetre: 254 per inch.
+            // Tenths of a millimetre: 254 per inch, 72 points per inch.
             writer.uint16XY(
-                (geometry.width * 254 + geometry.dpi / 2) / geometry.dpi,
-                (geometry.height * 254 + geometry.dpi / 2) / geometry.dpi, .customMediaSize)
+                Int((sheet.width * 254 / 72).rounded()), Int((sheet.height * 254 / 72).rounded()), .customMediaSize)
             writer.enumeration(PCLXLMeasure.tenthsOfAMillimeter, .customMediaSizeUnits)
         }
         writer.enumeration(mediaSource, .mediaSource)
@@ -179,7 +180,7 @@ public struct PCLXLBackend: PDLBackend {
             colorSpace = wanted
         }
 
-        writer.uint16XY(band.x, band.y, .point)
+        writer.uint16XY(origin.x + band.x, origin.y + band.y, .point)
         writer.op(.setCursor)
 
         writer.enumeration(PCLXLColorMapping.directPixel, .colorMapping)

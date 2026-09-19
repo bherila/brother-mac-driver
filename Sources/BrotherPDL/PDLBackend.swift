@@ -17,20 +17,58 @@ public enum PixelFormat: Sendable, Equatable {
 }
 
 /// Geometry and format of one page of raster, as delivered by the print system.
+///
+/// The raster normally covers only the imageable area of the sheet, not the whole sheet, so the
+/// sheet size and the raster's position on it are carried separately.
 public struct PageGeometry: Sendable, Equatable {
     public var width: Int
     public var height: Int
     public var dpi: Int
     public var format: PixelFormat
+    /// Physical sheet size in points. Nil means the raster is the whole sheet.
+    public var mediaPoints: Size?
+    /// Where the raster's top-left pixel sits on the sheet, in pixels from the sheet's top-left corner.
+    public var origin: Origin
 
-    public init(width: Int, height: Int, dpi: Int, format: PixelFormat) {
+    public struct Size: Sendable, Equatable {
+        public var width: Double
+        public var height: Double
+
+        public init(width: Double, height: Double) {
+            self.width = width
+            self.height = height
+        }
+    }
+
+    public struct Origin: Sendable, Equatable {
+        public var x: Int
+        public var y: Int
+
+        public init(x: Int, y: Int) {
+            self.x = x
+            self.y = y
+        }
+
+        public static let zero = Origin(x: 0, y: 0)
+    }
+
+    public init(
+        width: Int, height: Int, dpi: Int, format: PixelFormat, mediaPoints: Size? = nil, origin: Origin = .zero
+    ) {
         self.width = width
         self.height = height
         self.dpi = dpi
         self.format = format
+        self.mediaPoints = mediaPoints
+        self.origin = origin
     }
 
     public var bytesPerRow: Int { format.bytesPerRow(width: width) }
+
+    /// The sheet size in points: as given, or derived from the raster when it is the whole sheet.
+    public var sheetPoints: Size {
+        mediaPoints ?? Size(width: Double(width) * 72 / Double(dpi), height: Double(height) * 72 / Double(dpi))
+    }
 }
 
 /// Where a backend writes device bytes. The filter points this at stdout; tests collect into memory.
