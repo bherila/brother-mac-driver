@@ -109,6 +109,20 @@ import Testing
         #expect(MediaSize.matching(widthPoints: 792, heightPoints: 612)?.ppdName == "Letter")
     }
 
+    /// DL (312 × 624) and long-edge DL (624 × 312) are each other's rotation: the orientation given
+    /// must decide, not the order of the table.
+    @Test func matchingPrefersTheStraightOrientation() {
+        #expect(MediaSize.matching(widthPoints: 624, heightPoints: 312)?.ppdName == "EnvPRC5Rotated")
+        #expect(MediaSize.matching(widthPoints: 312, heightPoints: 624)?.ppdName == "EnvDL")
+        #expect(MediaSize.matching(widthPoints: 623, heightPoints: 313)?.ppdName == "EnvPRC5Rotated")
+    }
+
+    @Test func matchingCanRefuseRotation() {
+        #expect(MediaSize.matching(widthPoints: 792, heightPoints: 612, allowingRotation: false) == nil)
+        #expect(MediaSize.matching(widthPoints: 612, heightPoints: 792, allowingRotation: false)?.ppdName == "Letter")
+        #expect(MediaSize.matching(widthPoints: 624, heightPoints: 312, allowingRotation: false)?.ppdName == "EnvPRC5Rotated")
+    }
+
     @Test func matchingMiss() {
         #expect(MediaSize.matching(widthPoints: 100, heightPoints: 100) == nil)
     }

@@ -62,31 +62,24 @@ extension MediaSize {
         all.first { $0.ppdName == ppdName }
     }
 
-    /// The size whose dimensions are within `tolerance` points of the given ones, in either orientation.
-    public static func matching(widthPoints: Double, heightPoints: Double, tolerance: Double = 2) -> MediaSize? {
-        var best: MediaSize?
-        var bestDistance = Double.greatestFiniteMagnitude
-
-        for size in all {
-            let straightMatches =
-                abs(size.widthPoints - widthPoints) <= tolerance && abs(size.heightPoints - heightPoints) <= tolerance
-            let rotatedMatches =
-                abs(size.widthPoints - heightPoints) <= tolerance && abs(size.heightPoints - widthPoints) <= tolerance
-            guard straightMatches || rotatedMatches else { continue }
-
-            let straightDistance = abs(size.widthPoints - widthPoints) + abs(size.heightPoints - heightPoints)
-            let rotatedDistance = abs(size.widthPoints - heightPoints) + abs(size.heightPoints - widthPoints)
-            let distance = min(
-                straightMatches ? straightDistance : .greatestFiniteMagnitude,
-                rotatedMatches ? rotatedDistance : .greatestFiniteMagnitude
-            )
-
-            if distance < bestDistance {
-                bestDistance = distance
-                best = size
-            }
+    /// The size whose dimensions are within `tolerance` points of the given ones.
+    ///
+    /// A size matching as given always beats one that only matches turned by 90°: some sizes are
+    /// each other's rotation (DL and long-edge DL), and which one a sheet is depends on how it lies.
+    /// Pass `allowingRotation: false` when the caller cannot act on a turned match.
+    public static func matching(
+        widthPoints: Double, heightPoints: Double, tolerance: Double = 2, allowingRotation: Bool = true
+    ) -> MediaSize? {
+        func closest(_ distance: (MediaSize) -> (Double, Double)) -> MediaSize? {
+            all.map { (size: $0, distance: distance($0)) }
+                .filter { $0.distance.0 <= tolerance && $0.distance.1 <= tolerance }
+                .min { $0.distance.0 + $0.distance.1 < $1.distance.0 + $1.distance.1 }?
+                .size
         }
-
-        return best
+        if let straight = closest({ (abs($0.widthPoints - widthPoints), abs($0.heightPoints - heightPoints)) }) {
+            return straight
+        }
+        guard allowingRotation else { return nil }
+        return closest { (abs($0.widthPoints - heightPoints), abs($0.heightPoints - widthPoints)) }
     }
 }

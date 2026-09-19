@@ -65,7 +65,10 @@ public struct PCLXLBackend: PDLBackend {
 
         writer.enumeration(PCLXLOrientation.portrait, .orientation)
         let sheet = geometry.sheetPoints
-        let media = options.media ?? MediaSize.matching(widthPoints: sheet.width, heightPoints: sheet.height)
+        // Pages always go out as portrait, so a size that only matches turned on its side would tell
+        // the printer the sheet is narrower than the raster. Such a sheet is declared by its dimensions.
+        let media = options.media
+            ?? MediaSize.matching(widthPoints: sheet.width, heightPoints: sheet.height, allowingRotation: false)
         if let code = media?.pclxl {
             writer.enumeration(code, .mediaSize)
         } else {

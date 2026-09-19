@@ -220,6 +220,26 @@ private func samplePage(width: Int, height: Int, colorAt colorRows: Range<Int>?)
         #expect(images.map { [$0.x, $0.y, $0.width, $0.height] } == [[100, 100, 2, 1], [4999, 6499, 1, 1]])
     }
 
+    /// The sheet is declared exactly as the raster is laid out. A sheet that only matches a known
+    /// size when turned must not be declared as that size: the page is always sent as portrait, so
+    /// the printer would take the sheet to be narrower than the raster and clip it.
+    @Test(arguments: [
+        // Long-edge DL envelope, the rotation of the DL envelope that precedes it in the table.
+        (624.0, 312.0, 5000, 2400, [2201, 1101]),
+        // US Letter turned on its side.
+        (792.0, 612.0, 6400, 4900, [2794, 2159]),
+    ])
+    func sidewaysSheetIsNeverDeclaredAsItsUprightSize(
+        sheetWidth: Double, sheetHeight: Double, width: Int, height: Int, tenthsOfMillimetre: [Int]
+    ) throws {
+        var page = TestPage(width: width, height: height, format: .gray8)
+        page.geometry.mediaPoints = .init(width: sheetWidth, height: sheetHeight)
+        page.geometry.origin = .init(x: 100, y: 100)
+        let begin = try beginPages([page])[0]
+        #expect(begin[.mediaSize] == nil)
+        #expect(begin[.customMediaSize]?.intArray == tenthsOfMillimetre)
+    }
+
     @Test func explicitMediaWins() throws {
         var options = JobOptions()
         options.media = MediaSize.named("A5")
