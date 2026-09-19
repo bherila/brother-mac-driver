@@ -35,7 +35,6 @@ jobs:
           command -v shellcheck >/dev/null || brew install shellcheck
           shellcheck scripts/*.sh
 
-      # Depends on the runner's CUPS PDF filters working headless, which is outside our control.
-      - name: Smoke test through the system filter chain
-        continue-on-error: true
-        run: scripts/smoke-test.sh
+      # PDF -> the system's rasteriser driven by our PPD -> our filter -> decode -> pixel compare.
+      - name: End-to-end through the system filter chain
+        run: scripts/e2e-test.sh
