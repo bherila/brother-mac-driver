@@ -5,9 +5,9 @@ import Testing
 @Suite struct MediaTests {
     /// PPD `*PageSize` keywords in the order Brother's GPL PPD lists them.
     static let expectedOrder = [
-        "A4", "Letter", "Legal", "Executive", "A5", "A6", "B5", "JISB5", "JISB6",
-        "EnvDL", "EnvC5", "Env10", "EnvMonarch", "Br3x5", "FanFoldGermanLegal",
-        "EnvPRC5Rotated", "Postcard", "EnvYou4", "EnvChou3",
+        "A4", "Letter", "Legal", "Executive", "A5", "A6", "ISOB5", "B5", "B6",
+        "EnvDL", "EnvC5", "Env10", "EnvMonarch", "3x5", "FanFoldGermanLegal",
+        "EnvDLRotated", "Postcard", "EnvYou4", "EnvChou3",
         "210x270mm", "195x270mm", "184x260mm", "197x273mm",
     ]
 
@@ -32,7 +32,7 @@ import Testing
     }
 
     /// Brother's raster table (`paperinfij2`), imageable-area width/height in 600-dpi pixels.
-    /// `ISOB5` in that file is `B5` in the PPD.
+    /// Keys are this driver's keywords (Adobe standard names), not the ones in Brother's files.
     static let paperinfij2: [String: (width: Int, height: Int)] = [
         "A4": (4760, 6812),
         "Letter": (4900, 6400),
@@ -40,16 +40,16 @@ import Testing
         "Executive": (4148, 6100),
         "A5": (3296, 4760),
         "A6": (2272, 3300),
-        "B5": (3956, 5708),
-        "JISB5": (4100, 5872),
-        "JISB6": (2824, 4100),
+        "ISOB5": (3956, 5708),
+        "B5": (4100, 5872),
+        "B6": (2824, 4100),
         "EnvDL": (2400, 4996),
         "EnvC5": (3624, 5208),
         "Env10": (2272, 5500),
         "EnvMonarch": (2124, 4300),
-        "Br3x5": (1600, 2800),
+        "3x5": (1600, 2800),
         "FanFoldGermanLegal": (4900, 7600),
-        "EnvPRC5Rotated": (5000, 2400),
+        "EnvDLRotated": (5000, 2400),
         "Postcard": (2164, 3288),
         "EnvYou4": (2280, 5348),
         "EnvChou3": (2632, 5348),
@@ -112,15 +112,15 @@ import Testing
     /// DL (312 × 624) and long-edge DL (624 × 312) are each other's rotation: the orientation given
     /// must decide, not the order of the table.
     @Test func matchingPrefersTheStraightOrientation() {
-        #expect(MediaSize.matching(widthPoints: 624, heightPoints: 312)?.ppdName == "EnvPRC5Rotated")
+        #expect(MediaSize.matching(widthPoints: 624, heightPoints: 312)?.ppdName == "EnvDLRotated")
         #expect(MediaSize.matching(widthPoints: 312, heightPoints: 624)?.ppdName == "EnvDL")
-        #expect(MediaSize.matching(widthPoints: 623, heightPoints: 313)?.ppdName == "EnvPRC5Rotated")
+        #expect(MediaSize.matching(widthPoints: 623, heightPoints: 313)?.ppdName == "EnvDLRotated")
     }
 
     @Test func matchingCanRefuseRotation() {
         #expect(MediaSize.matching(widthPoints: 792, heightPoints: 612, allowingRotation: false) == nil)
         #expect(MediaSize.matching(widthPoints: 612, heightPoints: 792, allowingRotation: false)?.ppdName == "Letter")
-        #expect(MediaSize.matching(widthPoints: 624, heightPoints: 312, allowingRotation: false)?.ppdName == "EnvPRC5Rotated")
+        #expect(MediaSize.matching(widthPoints: 624, heightPoints: 312, allowingRotation: false)?.ppdName == "EnvDLRotated")
     }
 
     @Test func matchingMiss() {
