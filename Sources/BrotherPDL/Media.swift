@@ -32,6 +32,10 @@ public struct MediaSize: Equatable, Sendable {
 
 extension MediaSize {
     /// Every size offered for the MFC-9330CDW family, in print-dialog order.
+    ///
+    /// Keywords are the Adobe standard names where one exists, so macOS can match an application's
+    /// page size to the PPD. Brother's own PPD calls ISO B5 `B5`, JIS B5 `JISB5`, JIS B6 `JISB6`,
+    /// 3 × 5 in `Br3x5` and rotated DL `EnvPRC5Rotated`.
     public static let all: [MediaSize] = [
         MediaSize(ppdName: "A4", displayName: "A4", widthPoints: 595, heightPoints: 842, pclxl: .a4),
         MediaSize(ppdName: "Letter", displayName: "US Letter", widthPoints: 612, heightPoints: 792, pclxl: .letter),
@@ -39,16 +43,16 @@ extension MediaSize {
         MediaSize(ppdName: "Executive", displayName: "Executive", widthPoints: 522, heightPoints: 756, pclxl: .executive),
         MediaSize(ppdName: "A5", displayName: "A5", widthPoints: 420, heightPoints: 595, pclxl: .a5),
         MediaSize(ppdName: "A6", displayName: "A6", widthPoints: 297, heightPoints: 420, pclxl: .a6),
-        MediaSize(ppdName: "B5", displayName: "B5 (ISO)", widthPoints: 499, heightPoints: 709, pclxl: .isoB5),
-        MediaSize(ppdName: "JISB5", displayName: "B5 (JIS)", widthPoints: 516, heightPoints: 729, pclxl: .jisB5),
-        MediaSize(ppdName: "JISB6", displayName: "B6 (JIS)", widthPoints: 363, heightPoints: 516, pclxl: .jisB6),
+        MediaSize(ppdName: "ISOB5", displayName: "B5 (ISO)", widthPoints: 499, heightPoints: 709, pclxl: .isoB5),
+        MediaSize(ppdName: "B5", displayName: "B5 (JIS)", widthPoints: 516, heightPoints: 729, pclxl: .jisB5),
+        MediaSize(ppdName: "B6", displayName: "B6 (JIS)", widthPoints: 363, heightPoints: 516, pclxl: .jisB6),
         MediaSize(ppdName: "EnvDL", displayName: "Envelope DL", widthPoints: 312, heightPoints: 624, pclxl: .dlEnvelope),
         MediaSize(ppdName: "EnvC5", displayName: "Envelope C5", widthPoints: 459, heightPoints: 649, pclxl: .c5Envelope),
         MediaSize(ppdName: "Env10", displayName: "Envelope #10", widthPoints: 297, heightPoints: 684, pclxl: .com10Envelope),
         MediaSize(ppdName: "EnvMonarch", displayName: "Envelope Monarch", widthPoints: 279, heightPoints: 540, pclxl: .monarchEnvelope),
-        MediaSize(ppdName: "Br3x5", displayName: "3 × 5 in", widthPoints: 216, heightPoints: 360, pclxl: nil),
+        MediaSize(ppdName: "3x5", displayName: "3 × 5 in", widthPoints: 216, heightPoints: 360, pclxl: nil),
         MediaSize(ppdName: "FanFoldGermanLegal", displayName: "Folio", widthPoints: 612, heightPoints: 936, pclxl: nil),
-        MediaSize(ppdName: "EnvPRC5Rotated", displayName: "Envelope DL (long edge)", widthPoints: 624, heightPoints: 312, pclxl: nil),
+        MediaSize(ppdName: "EnvDLRotated", displayName: "Envelope DL (long edge)", widthPoints: 624, heightPoints: 312, pclxl: nil),
         MediaSize(ppdName: "Postcard", displayName: "Hagaki", widthPoints: 284, heightPoints: 419, pclxl: .jPostcard),
         MediaSize(ppdName: "EnvYou4", displayName: "Envelope You4", widthPoints: 298, heightPoints: 666, pclxl: nil),
         MediaSize(ppdName: "EnvChou3", displayName: "Envelope Chou3", widthPoints: 340, heightPoints: 666, pclxl: nil),
