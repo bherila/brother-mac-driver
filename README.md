@@ -8,8 +8,45 @@ Written in Swift. Targets Apple Silicon Macs running macOS 26 or later.
 
 > **Status: early development.** The whole software path works and is verified without hardware —
 > a PDF goes through the macOS rasteriser and this driver, and the PCL XL that comes out decodes
-> back to exactly the pixels that went in. **Nothing has been tested on a real printer yet**, and
-> there is no installer yet.
+> back to exactly the pixels that went in. **Nothing has been tested on a real printer yet.**
+
+## Is my printer supported?
+
+Plug the printer in over USB and run:
+
+```sh
+/Library/Printers/BrotherOSS/bin/pxltool usb-probe      # after installing
+.build/release/pxltool usb-probe                        # from a checkout
+```
+
+It reads what the printer reports about itself (nothing is printed) and says whether this driver
+can drive it. Serial numbers are left out of the output, so it is safe to paste into an issue.
+`scripts/probe-printer.sh` gathers the same facts with only the tools that ship with macOS.
+
+| Model | Language | Status |
+|---|---|---|
+| MFC-9330CDW | PCL XL | untested on hardware |
+
+Other Brother colour lasers that accept PCL XL (PCL 6) — the probe says so — should be easy to add.
+Models that only accept Brother's host-based XL2HB language are not supported.
+
+## Installing
+
+From a checkout (builds, then asks for your password to copy into `/Library/Printers`):
+
+```sh
+scripts/install.sh
+```
+
+Or build an installer package with `scripts/make-pkg.sh`; CI attaches an unsigned one to every run
+as the `brother-mac-driver-pkg` artifact. An unsigned package has to be allowed once under
+System Settings → Privacy & Security → "Open Anyway". Signing and notarization are driven by the
+`CODESIGN_IDENTITY`, `INSTALLER_IDENTITY` and `NOTARY_PROFILE` variables described in the script.
+
+Then add the printer in System Settings → Printers & Scanners. A supported model picks this driver
+by itself; otherwise choose "Brother <model>, brother-mac-driver" under "Select Software…".
+
+`scripts/uninstall.sh` removes everything the installer added.
 
 ## How it works
 
@@ -36,7 +73,12 @@ is known about the printers' languages and what still needs confirming on hardwa
 swift build -c release
 swift test
 scripts/e2e-test.sh     # PDF → macOS rasteriser → filter → decode → pixel compare, plus cupstestppd
+scripts/test-queue.sh   # after installing: print through the real print system into a fake printer
 ```
+
+`test-queue.sh` creates a temporary queue pointed at a listener on localhost, prints a calibration
+page to it, and decodes what the print system actually sent. It needs the driver installed and an
+administrator account, and removes the queue again when it finishes.
 
 Requires Xcode 26 or later.
 
