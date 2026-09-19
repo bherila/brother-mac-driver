@@ -1,0 +1,68 @@
+#!/bin/bash
+# Removes the filter, this project's installed PPDs, and the pkg receipt.
+# Never touches print queues: a queue can be mid-job, and CUPS has no "which
+# driver made this queue" query, so this only reports which queues to remove by hand.
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "$0")/.." && pwd)"
+build_dir="${BUILD_DIR:-$repo_root/.build/release}"
+pkg_id="io.github.bherila.brother-mac-driver"
+filter_root="/Library/Printers/BrotherOSS"
+ppd_dest_dir="/Library/Printers/PPDs/Contents/Resources"
+
+work="$(mktemp -d)"
+trap 'rm -rf "$work"' EXIT
+
+# Prefer the exact model list from the build; only fall back to a content match
+# (never delete some other Brother driver's PPD) when no build is available.
+ppd_files=()
+pxltool="$build_dir/pxltool"
+if [[ -x "$pxltool" ]]; then
+    "$pxltool" ppd --out "$work/ppd" >/dev/null
+    for ppd in "$work"/ppd/Brother-*.ppd; do
+        [[ -e "$ppd" ]] || continue
+        ppd_files+=("$ppd_dest_dir/$(basename "$ppd").gz")
+    done
+else
+    echo "no build found at $build_dir; falling back to matching installed PPDs by content" >&2
+    for candidate in "$ppd_dest_dir"/Brother-*.ppd.gz; do
+        [[ -e "$candidate" ]] || continue
+        if gzip -dc "$candidate" 2>/dev/null | grep -q "brother-mac-driver"; then
+            ppd_files+=("$candidate")
+        fi
+    done
+fi
+
+if [[ -d "$filter_root" ]]; then
+    echo "removing $filter_root"
+    sudo rm -rf "$filter_root"
+else
+    echo "$filter_root not present, skipping"
+fi
+
+# bash 3.2 (the macOS default) treats "${array[@]}" on an empty array as unbound under set -u.
+if ((${#ppd_files[@]} > 0)); then
+    for ppd in "${ppd_files[@]}"; do
+        [[ -e "$ppd" ]] || continue
+        echo "removing $ppd"
+        sudo rm -f "$ppd"
+    done
+fi
+
+if pkgutil --pkg-info "$pkg_id" >/dev/null 2>&1; then
+    echo "forgetting package receipt $pkg_id"
+    sudo pkgutil --forget "$pkg_id"
+fi
+
+echo
+echo "print queues that still use this driver (remove these yourself in System Settings > Printers & Scanners):"
+matches="$(grep -l "brother-mac-driver" /etc/cups/ppd/*.ppd 2>/dev/null || true)"
+if [[ -z "$matches" ]]; then
+    echo "  none found"
+else
+    while IFS= read -r ppd_file; do
+        queue="$(basename "$ppd_file" .ppd)"
+        uri="$(lpstat -v "$queue" 2>/dev/null | sed 's/^device for [^:]*: //')" || true
+        echo "  $queue (${uri:-device unknown})"
+    done <<<"$matches"
+fi
