@@ -22,6 +22,10 @@ enum PxlTool {
           dump [file]                       list the PJL wrapper, stream header and operators
           render [file] --out <dir>         write page-001.png … for every page
                        [--width W --height H]
+          compare <raster> <job>            check a job pixel for pixel against its CUPS raster
+          ppd --out <dir> [--model NAME]    write the driver's PPD files
+          testpdf --out <file> [--size NAME] [--pages N] [--gray yes]
+                                            write a calibration page as PDF
 
         `file` may be omitted or given as `-` to read the job from standard input.
         """
@@ -38,6 +42,12 @@ enum PxlTool {
                 try dump(rest)
             case "render":
                 try render(rest)
+            case "ppd":
+                try ppd(rest)
+            case "compare":
+                try compare(rest)
+            case "testpdf":
+                try testPDF(rest)
             case "-h", "--help", "help":
                 write(usage, to: FileHandle.standardOutput)
             default:
@@ -235,7 +245,7 @@ enum PxlTool {
     // MARK: - support
 
     /// Hand-rolled argument parsing: one optional positional path plus `--name value` options.
-    private struct Options {
+    struct Options {
         var path: String?
         var values: [String: String] = [:]
 
@@ -269,7 +279,7 @@ enum PxlTool {
         }
     }
 
-    private static func readInput(_ path: String?) throws -> [UInt8] {
+    static func readInput(_ path: String?) throws -> [UInt8] {
         guard let path, path != "-" else {
             return Array(FileHandle.standardInput.readDataToEndOfFile())
         }
@@ -302,7 +312,7 @@ enum PxlTool {
         return String(first).uppercased() + text.dropFirst()
     }
 
-    private static func write(_ text: String, to handle: FileHandle) {
+    static func write(_ text: String, to handle: FileHandle) {
         handle.write(Data((text + "\n").utf8))
     }
 }
