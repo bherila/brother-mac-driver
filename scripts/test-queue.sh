@@ -68,11 +68,14 @@ if [[ ! -f "$ppd" ]]; then
     exit 1
 fi
 
-lpadmin -p "$queue" -E -v "socket://127.0.0.1:$port" -P "$ppd" -o printer-is-shared=false
-queue_created=1
-
+# The listener goes up before the queue exists, so nothing can be sent to the port before it is
+# ready. nc serves one connection and exits; if that happens before our job is done, something
+# else took the connection and the job would only sit in retry until the timeout.
 nc -l 127.0.0.1 "$port" >"$work/capture.pxl" &
 nc_pid=$!
+
+lpadmin -p "$queue" -E -v "socket://127.0.0.1:$port" -P "$ppd" -o printer-is-shared=false
+queue_created=1
 
 "$pxltool" testpdf --out "$work/test.pdf" --pages 2
 
@@ -83,6 +86,10 @@ elapsed=0
 while [[ -n "$(lpstat -W not-completed -o "$queue" 2>/dev/null)" ]]; do
     if ((elapsed >= timeout_seconds)); then
         echo "job on $queue did not finish within ${timeout_seconds}s" >&2
+        exit 1
+    fi
+    if ! kill -0 "$nc_pid" 2>/dev/null && [[ ! -s "$work/capture.pxl" ]]; then
+        echo "the listener on port $port closed before receiving the job (did something else connect to it?)" >&2
         exit 1
     fi
     sleep 1
