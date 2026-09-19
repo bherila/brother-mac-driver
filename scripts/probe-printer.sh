@@ -16,8 +16,10 @@ set -euo pipefail
 # hence the bracket pairs.
 redact() {
     local key='([Ss][Ee][Rr][Ii][Aa][Ll][Nn][Uu][Mm][Bb][Ee][Rr]|[Ss][Ee][Rr][Ii][Aa][Ll]|[Ss][Ee][Rr][Nn]|[Ss][Nn])'
+    # A quoted value is taken whole, spaces included, before the unquoted rule gets a look at it.
     sed -E \
         -e 's/([Ss][Ee][Rr][Ii][Aa][Ll] [Nn][Uu][Mm][Bb][Ee][Rr]: *).*/\1REDACTED/' \
+        -e "s/(^|[^A-Za-z0-9])$key([:=])\"[^\"]*\"?/\\1\\2\\3REDACTED/g" \
         -e "s/(^|[^A-Za-z0-9])$key([:=])[^;&[:space:]]*/\\1\\2\\3REDACTED/g"
 }
 
@@ -28,8 +30,10 @@ describe_device_id() {
     local device_id model commands
     device_id="$(cat)"
     # grep exits 1 when a field is absent; that must not be fatal under set -e.
-    model="$(printf '%s' "$device_id" | grep -oE 'MDL:[^;]*' | head -1 | cut -d: -f2-)" || true
-    commands="$(printf '%s' "$device_id" | grep -oE '(CMD|COMMAND SET):[^;]*' | head -1 | cut -d: -f2- | tr ',' '\n')" || true
+    # Fields come in a short and a long spelling (MDL/MODEL, CMD/COMMAND SET), and a key only counts
+    # at the start of a field. Values are trimmed: "PJL, PCLXL" must still yield PCLXL.
+    model="$(printf ';%s' "$device_id" | grep -oiE ';[[:space:]]*(MDL|MODEL):[^;]*' | head -1 | cut -d: -f2- | sed -E 's/^[[:space:]]+|[[:space:]]+$//g')" || true
+    commands="$(printf ';%s' "$device_id" | grep -oiE ';[[:space:]]*(CMD|COMMAND SET):[^;]*' | head -1 | cut -d: -f2- | tr ',' '\n' | sed -E 's/^[[:space:]]+|[[:space:]]+$//g')" || true
 
     echo "  model: ${model:-unknown}"
     if [[ -z "$commands" ]]; then
