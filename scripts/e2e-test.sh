@@ -133,6 +133,44 @@ if [[ "$(grep -c "EndPage" "$work/badpage.dump")" != 1 ]]; then
 fi
 grep -m1 "ERROR" "$work/badpage.filter.log" | sed 's/^/   /'
 
+# stdout that is non-blocking with a slow reader (not what CUPS normally gives a filter, but
+# nothing forbids it): the job must arrive intact, and the filter must wait for room rather than
+# spin, so its CPU time stays a small part of the elapsed time.
+echo "== non-blocking stdout"
+if ! python3 - "$filter" "$ppd" "$work/colour.ras" "$work/colour.pxl" <<'PY'
+import fcntl, hashlib, os, resource, subprocess, sys, time
+filter_path, ppd, raster, expected = sys.argv[1:5]
+read_end, write_end = os.pipe()
+fcntl.fcntl(write_end, fcntl.F_SETFL, fcntl.fcntl(write_end, fcntl.F_GETFL) | os.O_NONBLOCK)
+start = time.time()
+child = subprocess.Popen(
+    [filter_path, "1", "e2e", "colour", "1", "", raster],
+    stdout=write_end, stderr=subprocess.DEVNULL, env={**os.environ, "PPD": ppd})
+os.close(write_end)
+digest = hashlib.sha256()
+while chunk := os.read(read_end, 65536):
+    digest.update(chunk)
+    time.sleep(0.01)
+status = child.wait()
+elapsed = time.time() - start
+usage = resource.getrusage(resource.RUSAGE_CHILDREN)
+cpu = usage.ru_utime + usage.ru_stime
+print(f"   {elapsed:.1f} s elapsed, {cpu:.2f} s of CPU")
+problems = []
+if status != 0:
+    problems.append(f"filter exited {status}")
+if digest.hexdigest() != hashlib.sha256(open(expected, "rb").read()).hexdigest():
+    problems.append("output differs from the blocking run")
+if cpu > elapsed / 2:
+    problems.append("filter spent most of its time spinning")
+for problem in problems:
+    print(f"FAIL: {problem}", file=sys.stderr)
+sys.exit(1 if problems else 0)
+PY
+then
+    failures=$((failures + 1))
+fi
+
 if ((failures > 0)); then
     echo "$failures check(s) failed" >&2
     exit 1

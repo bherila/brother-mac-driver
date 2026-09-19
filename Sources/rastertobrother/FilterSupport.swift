@@ -31,11 +31,18 @@ enum Stdout {
         var offset = 0
         while offset < bytes.count {
             let written = Foundation.write(STDOUT_FILENO, bytes.baseAddress! + offset, bytes.count - offset)
-            if written < 0 {
-                if errno == EINTR || errno == EAGAIN { continue }
-                throw FilterError("Unable to send data to the printer: \(String(cString: strerror(errno)))")
+            if written > 0 {
+                offset += written
+            } else if written < 0 && errno == EINTR {
+                continue
+            } else if written < 0 && errno == EAGAIN {
+                // stdout is normally blocking; if it is not, wait for room instead of spinning.
+                var descriptor = pollfd(fd: STDOUT_FILENO, events: Int16(POLLOUT), revents: 0)
+                _ = poll(&descriptor, 1, -1)
+            } else {
+                let reason = written == 0 ? "no progress" : String(cString: strerror(errno))
+                throw FilterError("Unable to send data to the printer: \(reason)")
             }
-            offset += written
         }
     }
 }
