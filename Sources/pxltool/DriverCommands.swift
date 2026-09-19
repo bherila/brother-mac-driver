@@ -85,6 +85,10 @@ extension PxlTool {
                 return shifted
             }
             let actual = try page.composite(width: width, height: height, format: format)
+            // zip stops at the shorter buffer: a short render must not pass as identical.
+            guard actual.count == expected.count else {
+                throw ToolError.message("page \(index + 1): raster has \(expected.count) bytes, the rendered job \(actual.count)")
+            }
             if let mismatch = zip(expected, actual).enumerated().first(where: { $0.element.0 != $0.element.1 }) {
                 let bytesPerPixel = format == .rgb8 ? 3 : 1
                 let row = mismatch.offset / bytesPerRow
