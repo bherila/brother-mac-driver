@@ -2,9 +2,12 @@
 <installer-gui-script minSpecVersion="1">
     <title>brother-mac-driver @VERSION@</title>
     <options hostArchitectures="arm64" rootVolumeOnly="true"/>
-    <allowed-os-versions>
-        <os-version min="26.0"/>
-    </allowed-os-versions>
+    <!-- allowed-os-versions only takes effect inside volume-check. -->
+    <volume-check>
+        <allowed-os-versions>
+            <os-version min="26.0"/>
+        </allowed-os-versions>
+    </volume-check>
     <choices-outline>
         <line choice="@PKG_ID@"/>
     </choices-outline>
