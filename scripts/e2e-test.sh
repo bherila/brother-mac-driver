@@ -102,7 +102,8 @@ if grep -q "EndPage\|EndSession" "$work/truncated.dump"; then
     echo "FAIL: truncated job finished a page it never fully received" >&2
     failures=$((failures + 1))
 fi
-grep -c "EndImage" "$work/truncated.dump" | sed 's/^/   complete images sent before the cut: /'
+# grep exits 1 on no match; that must not end the script before the summary.
+echo "   complete images sent before the cut: $(grep -c "EndImage" "$work/truncated.dump" || true)"
 
 # A page the backend refuses (here: a second page at 300 dpi), after the first page has already
 # gone out. The filter must fail, but only after closing the job: the printer must not be left
@@ -131,7 +132,7 @@ if [[ "$(grep -c "EndPage" "$work/badpage.dump")" != 1 ]]; then
     echo "FAIL: the good first page should have been sent complete" >&2
     failures=$((failures + 1))
 fi
-grep -m1 "ERROR" "$work/badpage.filter.log" | sed 's/^/   /'
+echo "   $(grep -m1 "ERROR" "$work/badpage.filter.log" || echo "(the filter logged no ERROR line)")"
 
 # stdout that is non-blocking with a slow reader (not what CUPS normally gives a filter, but
 # nothing forbids it): the job must arrive intact, and the filter must wait for room rather than
