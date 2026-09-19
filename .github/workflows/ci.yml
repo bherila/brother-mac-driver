@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    runs-on: macos-26
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash -eo pipefail {0}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: |
+          sw_vers
+          swift --version
+
+      - name: Build (release)
+        run: swift build -c release
+
+      - name: Test
+        run: swift test
+
+      - name: Shellcheck
+        run: |
+          command -v shellcheck >/dev/null || brew install shellcheck
+          shellcheck scripts/*.sh
+
+      # Depends on the runner's CUPS PDF filters working headless, which is outside our control.
+      - name: Smoke test through the system filter chain
+        continue-on-error: true
+        run: scripts/smoke-test.sh
