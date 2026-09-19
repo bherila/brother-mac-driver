@@ -10,14 +10,15 @@ set -euo pipefail
 
 # --- redaction ---------------------------------------------------------------
 # Reads text on stdin and writes it back with every serial-number-shaped field blanked:
-# system_profiler's "Serial Number:", an lpinfo URI's "?serial=...", and a device-id's
-# SN:/SERN: fields.
+# system_profiler's "Serial Number:", an lpinfo URI's "?serial=...", and a device-id's serial
+# field under any of its names, in any letter case. The key must start a word, so a field that
+# merely ends in the same letters (DSN:) is left alone. sed here has no case-insensitive flag,
+# hence the bracket pairs.
 redact() {
+    local key='([Ss][Ee][Rr][Ii][Aa][Ll][Nn][Uu][Mm][Bb][Ee][Rr]|[Ss][Ee][Rr][Ii][Aa][Ll]|[Ss][Ee][Rr][Nn]|[Ss][Nn])'
     sed -E \
-        -e 's/(Serial Number: *).*/\1REDACTED/' \
-        -e 's/(serial=)[^&[:space:]]*/\1REDACTED/g' \
-        -e 's/(SERN:)[^;]*/\1REDACTED/g' \
-        -e 's/(SN:)[^;]*/\1REDACTED/g'
+        -e 's/([Ss][Ee][Rr][Ii][Aa][Ll] [Nn][Uu][Mm][Bb][Ee][Rr]: *).*/\1REDACTED/' \
+        -e "s/(^|[^A-Za-z0-9])$key([:=])[^;&[:space:]]*/\\1\\2\\3REDACTED/g"
 }
 
 # --- device-id parsing ---------------------------------------------------------
