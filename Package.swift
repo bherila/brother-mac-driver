@@ -17,8 +17,11 @@ let package = Package(
         // so it stays unit-testable and can be rehosted outside a CUPS filter.
         .target(name: "BrotherPDL"),
 
-        .executableTarget(name: "rastertobrother", dependencies: ["BrotherPDL", "CCUPS"]),
-        .executableTarget(name: "pxltool", dependencies: ["BrotherPDL"]),
+        // C wrappers for the PPD API, which Swift cannot call directly (deprecated since macOS 10.8).
+        .target(name: "CCUPSShim", linkerSettings: [.linkedLibrary("cups")]),
+
+        .executableTarget(name: "rastertobrother", dependencies: ["BrotherPDL", "CCUPS", "CCUPSShim"]),
+        .executableTarget(name: "pxltool", dependencies: ["BrotherPDL", "CCUPS"]),
 
         .testTarget(name: "BrotherPDLTests", dependencies: ["BrotherPDL"]),
     ]
