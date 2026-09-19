@@ -8,3 +8,14 @@ public enum PCLXLError: Error, Equatable, Sendable {
     /// Valid PCL XL that this implementation does not handle.
     case unsupported(String)
 }
+
+extension PCLXLError: CustomStringConvertible {
+    public var description: String {
+        switch self {
+        case .truncated(let offset): "data ended early at offset \(offset)"
+        case .unexpectedTag(let tag, let offset): "unexpected byte 0x\(String(tag, radix: 16)) at offset \(offset)"
+        case .malformed(let reason): "malformed data: \(reason)"
+        case .unsupported(let reason): reason
+        }
+    }
+}

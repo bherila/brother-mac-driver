@@ -104,6 +104,35 @@ if grep -q "EndPage\|EndSession" "$work/truncated.dump"; then
 fi
 grep -c "EndImage" "$work/truncated.dump" | sed 's/^/   complete images sent before the cut: /'
 
+# A page the backend refuses (here: a second page at 300 dpi), after the first page has already
+# gone out. The filter must fail, but only after closing the job: the printer must not be left
+# inside an open session waiting for data that will never come.
+echo "== unprintable second page"
+python3 - "$work/neutral.ras" "$work/badpage.ras" <<'PY'
+import struct, sys
+raster = open(sys.argv[1], "rb").read()
+assert raster[:4] == b"3SaR", "expected an uncompressed little-endian CUPS raster"
+header = bytearray(raster[4:4 + 1796])
+header[276:284] = struct.pack("<2I", 300, 300)  # HWResolution
+open(sys.argv[2], "wb").write(raster + bytes(header))
+PY
+status=0
+PPD="$ppd" "$filter" 1 e2e badpage 1 "" "$work/badpage.ras" >"$work/badpage.pxl" 2>"$work/badpage.filter.log" || status=$?
+"$pxltool" dump "$work/badpage.pxl" >"$work/badpage.dump"
+if ((status == 0)); then
+    echo "FAIL: a job with an unprintable page was reported as successful" >&2
+    failures=$((failures + 1))
+fi
+if ! ends_with_uel "$work/badpage.pxl"; then
+    echo "FAIL: the job was abandoned without a UEL" >&2
+    failures=$((failures + 1))
+fi
+if [[ "$(grep -c "EndPage" "$work/badpage.dump")" != 1 ]]; then
+    echo "FAIL: the good first page should have been sent complete" >&2
+    failures=$((failures + 1))
+fi
+grep -m1 "ERROR" "$work/badpage.filter.log" | sed 's/^/   /'
+
 if ((failures > 0)); then
     echo "$failures check(s) failed" >&2
     exit 1
