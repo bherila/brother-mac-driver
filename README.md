@@ -41,9 +41,12 @@ scripts/install.sh
 ```
 
 Or build an installer package with `scripts/make-pkg.sh`; CI attaches an unsigned one to every run
-as the `brother-mac-driver-pkg` artifact. An unsigned package has to be allowed once under
-System Settings → Privacy & Security → "Open Anyway". Signing and notarization are driven by the
-`CODESIGN_IDENTITY`, `INSTALLER_IDENTITY` and `NOTARY_PROFILE` variables described in the script.
+as the `brother-mac-driver-pkg` artifact. The package is not signed with an Apple Developer ID. If
+macOS refuses it (it will, when the file was downloaded), allow it once under System Settings →
+Privacy & Security → "Open Anyway", or install it with
+`sudo installer -pkg brother-mac-driver-*.pkg -target /`. Anyone with a Developer ID can produce a
+signed, notarized package: `scripts/make-pkg.sh` takes `CODESIGN_IDENTITY`, `INSTALLER_IDENTITY`
+and `NOTARY_PROFILE`.
 
 Then add the printer in System Settings → Printers & Scanners. A supported model picks this driver
 by itself; otherwise choose "Brother <model>, brother-mac-driver" under "Select Software…".
