@@ -36,10 +36,15 @@ capture system sw_vers
 capture arch uname -m
 capture usb-probe "$pxltool" usb-probe
 capture queues lpstat -t
-capture drivers sh -c "lpinfo -m | grep -i 'brother'"
+capture drivers sh -c "set -o pipefail; lpinfo -m | grep -i 'brother'"
 capture installed-files ls -laR /Library/Printers/BrotherOSS
 capture filter-signature codesign -dv /Library/Printers/BrotherOSS/filter/rastertobrother
-capture cups-error-log sh -c "grep -iE 'rastertobrother|brother|PAGE:|Started filter|filter failed' /var/log/cups/error_log | tail -400"
+# An unreadable log must not read as "nothing relevant in the log".
+if [[ -r /var/log/cups/error_log ]]; then
+    capture cups-error-log sh -c "grep -iE 'rastertobrother|brother|PAGE:|Started filter|filter failed' /var/log/cups/error_log | tail -400"
+else
+    echo "(/var/log/cups/error_log is not readable by this account; run from an administrator account)" >"$out/cups-error-log.txt"
+fi
 
 # The PPD of every queue that uses this driver, as CUPS holds it (it records the chosen defaults).
 for ppd in /etc/cups/ppd/*.ppd; do
