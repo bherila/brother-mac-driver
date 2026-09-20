@@ -99,14 +99,15 @@ extension PxlTool {
             to: FileHandle.standardOutput)
     }
 
-    /// One read from the back-channel; a timeout is simply "nothing to say right now".
+    /// One read from the back-channel. A timeout is not an error, and may still have delivered
+    /// data: a bulk read only completes on a short packet or a full buffer, so a reply that is an
+    /// exact multiple of the packet size arrives as "timed out, with bytes".
     private static func read(_ pipe: IOUSBHostPipe, timeout: TimeInterval) throws -> Data {
         guard let buffer = NSMutableData(length: 4096) else { return Data() }
         var received = 0
         do {
             try pipe.__sendIORequest(with: buffer, bytesTransferred: &received, completionTimeout: timeout)
         } catch let error as NSError where isTimeout(error) {
-            return Data()
         }
         return (buffer as Data).prefix(received)
     }

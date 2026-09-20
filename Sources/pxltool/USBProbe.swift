@@ -173,9 +173,13 @@ extension PxlTool {
             do {
                 try back.__sendIORequest(with: buffer, bytesTransferred: &received, completionTimeout: 1.5)
             } catch let error as NSError where isTimeout(error) {
-                // Nothing (more) to read within the window. Once something has arrived, that is the end.
-                if !reply.isEmpty { break }
-                continue
+                // A timed-out read can still carry bytes (a reply that is an exact multiple of the
+                // packet size never produces the short packet that completes a read). Once something
+                // has arrived and a window passes with nothing new, that is the end.
+                if received == 0 {
+                    if !reply.isEmpty { break }
+                    continue
+                }
             }
             // Any other error (a stalled or aborted pipe) is a finding in itself, not silence.
             reply.append((buffer as Data).prefix(received))
