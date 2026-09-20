@@ -39,11 +39,18 @@ jobs:
       - name: End-to-end through the system filter chain
         run: scripts/e2e-test.sh
 
-      - name: Build the installer package (unsigned)
-        run: BUILD_DIR="$PWD/.build/release" scripts/make-pkg.sh
+      # Builds the unsigned installer package too, and checks every ready-made job against its raster.
+      - name: Build the hardware visit kit
+        run: scripts/make-visit-kit.sh
 
       - uses: actions/upload-artifact@v4
         with:
           name: brother-mac-driver-pkg
           path: build/*.pkg
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: visit-kit
+          path: build/visit-kit.zip
           if-no-files-found: error
