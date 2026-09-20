@@ -40,7 +40,19 @@ extension PxlTool {
         let back = try channel.bulkIn.map { try interface.copyPipe(withAddress: $0) }
         write("sending \(job.count) bytes to \(name) (\(channel.summary))", to: FileHandle.standardError)
 
+        // Listening must never cost the job: a back-channel that fails stops being read, but the
+        // send still completes (half a job leaves the printer waiting for the rest) and whatever was
+        // heard up to then is still reported.
         var heard = Data()
+        var backChannelError: Error?
+        func listen(_ pipe: IOUSBHostPipe, timeout: TimeInterval) {
+            do {
+                heard.append(try read(pipe, timeout: timeout))
+            } catch {
+                backChannelError = error
+            }
+        }
+
         var offset = 0
         var stalledSince: Date?
         var chunks = 0
@@ -64,17 +76,20 @@ extension PxlTool {
             chunks += 1
             // Drain the back-channel now and then: some printers stop accepting data when their own
             // messages are not being read.
-            if let back, chunks.isMultiple(of: 16) {
-                heard.append(try read(back, timeout: 0.05))
+            if let back, backChannelError == nil, chunks.isMultiple(of: 16) {
+                listen(back, timeout: 0.05)
             }
         }
         write("sent; listening for \(listenSeconds) s", to: FileHandle.standardError)
 
         if let back {
             let deadline = Date().addingTimeInterval(TimeInterval(listenSeconds))
-            while Date() < deadline {
-                heard.append(try read(back, timeout: 1))
+            while backChannelError == nil, Date() < deadline {
+                listen(back, timeout: 1)
             }
+        }
+        if let backChannelError {
+            write("stopped listening: the back-channel failed (\(backChannelError.localizedDescription))", to: FileHandle.standardError)
         }
         let text = String(decoding: heard, as: UTF8.self).replacingOccurrences(of: "\r", with: "").replacingOccurrences(of: "\u{0C}", with: "\n")
         write(
