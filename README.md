@@ -89,6 +89,14 @@ administrator account, and removes the queue again when it finishes.
 
 Requires Xcode 26 or later.
 
+## Releasing
+
+Set `driverVersion` in `Sources/BrotherPDL/PPDGenerator.swift`, merge, then push a tag `v<version>`.
+The release workflow refuses a tag that disagrees with that version, runs the tests and the
+end-to-end check, and opens a **draft** release with the unsigned package and the visit kit
+attached. To ship a signed package instead, build it locally with `scripts/make-pkg.sh` and the
+signing variables, and swap it into the draft before publishing.
+
 ## Licence
 
 GPL-2.0-or-later. See [LICENSE](LICENSE).
