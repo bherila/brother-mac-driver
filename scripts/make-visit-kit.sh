@@ -45,10 +45,18 @@ for entry in "${jobs[@]}"; do
     ppd="$work/ppd/Brother-$model.ppd"
     cups_options=()
     for option in $job_options; do cups_options+=(-o "$option"); done
-    cupsfilter -p "$ppd" -m application/vnd.cups-raster ${cups_options[@]+"${cups_options[@]}"} \
-        "$work/$source.pdf" >"$work/$name.ras" 2>/dev/null
-    PPD="$ppd" "$filter" 1 kit "${name%.*}" 1 "$job_options" "$work/$name.ras" >"$kit/jobs/$name" 2>/dev/null
-    "$pxltool" compare "$work/$name.ras" "$kit/jobs/$name" >/dev/null
+    # The tools are chatty on stderr, so it is kept aside and shown only if a step fails.
+    log="$work/$name.log"
+    if ! {
+        cupsfilter -p "$ppd" -m application/vnd.cups-raster ${cups_options[@]+"${cups_options[@]}"} \
+            "$work/$source.pdf" >"$work/$name.ras" 2>"$log" &&
+            PPD="$ppd" "$filter" 1 kit "${name%.*}" 1 "$job_options" "$work/$name.ras" >"$kit/jobs/$name" 2>>"$log" &&
+            "$pxltool" compare "$work/$name.ras" "$kit/jobs/$name" >/dev/null 2>>"$log"
+    }; then
+        echo "failed to build or verify $name:" >&2
+        tail -20 "$log" >&2
+        exit 1
+    fi
     printf '  %-34s %8s bytes  verified\n' "$name" "$(wc -c <"$kit/jobs/$name" | tr -d ' ')"
 done
 
