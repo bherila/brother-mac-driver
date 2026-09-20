@@ -48,6 +48,15 @@ extension PrinterModel {
         PrinterModel(
             name: "MFC-9330CDW", backend: .pclxl, duplex: true, inputSlots: traySlots,
             mediaNames: nil, margins: nil, pagesPerMinute: 22, verified: false),
+        // Siblings that Brother lists with the same PCL 6 emulation and print engine. The names are
+        // what each is expected to report as MDL: Brother's HL models append " series", its MFC
+        // models do not. Neither has been seen on the wire.
+        PrinterModel(
+            name: "MFC-9340CDW", backend: .pclxl, duplex: true, inputSlots: traySlots,
+            mediaNames: nil, margins: nil, pagesPerMinute: 22, verified: false),
+        PrinterModel(
+            name: "HL-3170CDW series", backend: .pclxl, duplex: true, inputSlots: traySlots,
+            mediaNames: nil, margins: nil, pagesPerMinute: 22, verified: false),
         // Sizes and margins as used by the brlaser project for this family.
         PrinterModel(
             name: "HL-2140 series", backend: .mono, duplex: false, inputSlots: traySlots,

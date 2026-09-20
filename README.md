@@ -26,6 +26,7 @@ can drive it. Serial numbers are left out of the output, so it is safe to paste 
 | Model | Language | Status |
 |---|---|---|
 | MFC-9330CDW | PCL XL | untested on hardware |
+| MFC-9340CDW, HL-3170CDW | PCL XL | untested on hardware; added because Brother lists the same PCL 6 emulation |
 | HL-2140 series | Brother host-based mono | untested on hardware |
 
 Other Brother colour lasers that accept PCL XL (PCL 6) — the probe says so — should be easy to add.
