@@ -59,7 +59,11 @@ done
 # way it ends up being run. %q keeps the paths safe to paste into it.
 {
     echo "set -euo pipefail"
-    printf 'install -o root -g wheel -m 0755 -d %q %q %q\n' "$filter_dest_dir" "$tool_dest_dir" "$ppd_dest_dir"
+    # install -d gives its mode only to the last component; directories it creates on the way
+    # there take the caller's umask, and with 077 CUPS could not reach the filter.
+    echo "umask 022"
+    printf 'install -o root -g wheel -m 0755 -d %q %q %q %q\n' \
+        "$(dirname "$filter_dest_dir")" "$filter_dest_dir" "$tool_dest_dir" "$ppd_dest_dir"
     printf 'install -o root -g wheel -m 0755 %q %q\n' "$work/rastertobrother" "$filter_dest"
     printf 'install -o root -g wheel -m 0755 %q %q\n' "$work/pxltool" "$tool_dest_dir/pxltool"
     for ppd in "$work"/ppd/Brother-*.ppd.gz; do

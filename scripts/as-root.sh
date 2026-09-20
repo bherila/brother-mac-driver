@@ -28,10 +28,15 @@ run_as_root() {
     directly*) bash "$script" ;;
     "with sudo") sudo bash "$script" ;;
     *)
-        osascript \
+        # The dialog route returns the script's output only once it has finished, and turns a
+        # cancelled dialog or a failed step into an AppleScript error; say what that means.
+        if ! osascript \
             -e 'on run argv' \
             -e 'do shell script "/bin/bash " & quoted form of item 1 of argv with prompt "brother-mac-driver needs administrator access to change /Library/Printers." with administrator privileges' \
-            -e 'end run' "$script"
+            -e 'end run' "$script"; then
+            echo "the privileged step did not complete (dialog cancelled, or a command in it failed)" >&2
+            return 1
+        fi
         ;;
     esac
 }
