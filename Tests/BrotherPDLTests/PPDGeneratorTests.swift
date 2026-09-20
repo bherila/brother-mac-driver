@@ -88,6 +88,30 @@ import Testing
         #expect(ppd.hasPrefix("*PPD-Adobe: \"4.3\"\n"))
     }
 
+    // MARK: Every model
+
+    @Test func everyModelHasAUniqueFileNameShortNameAndDeviceID() {
+        let models = PrinterModel.all
+        #expect(Set(models.map(\.ppdBaseName)).count == models.count)
+        #expect(Set(models.map(PPDGenerator.pcFileName)).count == models.count)
+        #expect(Set(models.map(\.name)).count == models.count)
+        for model in models {
+            let name = PPDGenerator.pcFileName(model)
+            #expect(name.count <= 12 && name == name.uppercased(), "\(name)")
+            #expect(!model.ppdBaseName.contains(" "))
+            #expect(PrinterModel.named(model.name) == model)
+        }
+    }
+
+    @Test func colourSiblingsShareTheFlagshipsOptions() {
+        func options(_ name: String) -> [Substring] {
+            PPDGenerator.ppd(for: PrinterModel.named(name)!).split(separator: "\n")
+                .filter { $0.hasPrefix("*OpenUI ") || $0.hasPrefix("*Default") || $0.hasPrefix("*cupsFilter") || $0.hasPrefix("*BRBackend") }
+        }
+        #expect(options("MFC-9340CDW") == options("MFC-9330CDW"))
+        #expect(options("HL-3170CDW") == options("MFC-9330CDW"))
+    }
+
     // MARK: Mono models
 
     var monoLines: [Substring] {
