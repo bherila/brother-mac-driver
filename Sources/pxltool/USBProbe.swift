@@ -27,6 +27,7 @@ extension PxlTool {
         defer { IOObjectRelease(iterator) }
 
         var found = 0
+        var queried = Set<Int>()
         while case let service = IOIteratorNext(iterator), service != 0 {
             defer { IOObjectRelease(service) }
             func property(_ key: String) -> Any? {
@@ -67,7 +68,14 @@ extension PxlTool {
                     write("  \(channel.summary)", to: FileHandle.standardOutput)
                 }
 
-                if queryPJL {
+                // PJL goes to one printer interface per device, the first the registry lists (in practice
+                // interface 0, the printer proper). Further ones - PC-Fax presents itself as a printer -
+                // are listed but left alone.
+                let device = number("locationID") ?? 0
+                let isPrimary = queried.insert(device).inserted
+                if queryPJL && !isPrimary {
+                    write("  (a further interface of a device already queried; PJL not sent)", to: FileHandle.standardOutput)
+                } else if queryPJL {
                     if vendor == brotherVendorID {
                         let reply = try pjlQuery(interface, channels: channels)
                         write("  PJL replies:\n" + (showSerial ? reply : DeviceID.redactingSerial(reply)).split(separator: "\n").map { "    \($0)" }.joined(separator: "\n"), to: FileHandle.standardOutput)
@@ -96,7 +104,7 @@ extension PxlTool {
         return String(decoding: bytes.dropFirst(2).prefix(max(0, length - 2)), as: UTF8.self)
     }
 
-    private static func isTimeout(_ error: NSError) -> Bool {
+    static func isTimeout(_ error: NSError) -> Bool {
         // kIOReturnTimeout and kIOUSBTransactionTimeout, as the signed 32-bit values IOKit reports.
         [Int(Int32(bitPattern: 0xE000_02D6)), Int(Int32(bitPattern: 0xE000_4051))].contains(error.code)
     }
@@ -117,7 +125,7 @@ extension PxlTool {
 
     /// Every alternate setting of this interface that speaks the raw printer protocols. Printers
     /// commonly offer a send-only setting and a two-way one; only the latter can answer.
-    private static func rawChannels(of interface: IOUSBHostInterface) -> [RawChannel] {
+    static func rawChannels(of interface: IOUSBHostInterface) -> [RawChannel] {
         let configuration = interface.configurationDescriptor
         let number = interface.interfaceDescriptor.pointee.bInterfaceNumber
         var channels: [RawChannel] = []
@@ -173,9 +181,13 @@ extension PxlTool {
             do {
                 try back.__sendIORequest(with: buffer, bytesTransferred: &received, completionTimeout: 1.5)
             } catch let error as NSError where isTimeout(error) {
-                // Nothing (more) to read within the window. Once something has arrived, that is the end.
-                if !reply.isEmpty { break }
-                continue
+                // A timed-out read can still carry bytes (a reply that is an exact multiple of the
+                // packet size never produces the short packet that completes a read). Once something
+                // has arrived and a window passes with nothing new, that is the end.
+                if received == 0 {
+                    if !reply.isEmpty { break }
+                    continue
+                }
             }
             // Any other error (a stalled or aborted pipe) is a finding in itself, not silence.
             reply.append((buffer as Data).prefix(received))

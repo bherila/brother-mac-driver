@@ -78,6 +78,11 @@ scripts/e2e-test.sh     # PDF → macOS rasteriser → filter → decode → pix
 scripts/test-queue.sh   # after installing: print through the real print system into a fake printer
 ```
 
+`scripts/make-visit-kit.sh` builds what a first session with a real printer needs — the installer,
+numbered ready-made jobs that each answer one question, a log collector and
+[a checklist](docs/hardware-visit.md). `pxltool usb-send` sends such a job straight to a Brother
+printer over USB, with no print queue involved, and shows what the printer says back.
+
 `test-queue.sh` creates a temporary queue pointed at a listener on localhost, prints a calibration
 page to it, and decodes what the print system actually sent. It needs the driver installed and an
 administrator account, and removes the queue again when it finishes.
