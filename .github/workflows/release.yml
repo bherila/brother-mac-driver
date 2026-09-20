@@ -1,0 +1,55 @@
+name: Release
+
+# Pushing a tag vX.Y builds and verifies everything, then opens a DRAFT release with the installer
+# package and the hardware visit kit attached. Publishing the draft is a deliberate, manual step.
+#
+# The package is unsigned. Signing and notarization need a Developer ID and are done locally with
+# scripts/make-pkg.sh (CODESIGN_IDENTITY, INSTALLER_IDENTITY, NOTARY_PROFILE); a signed package can
+# then be attached to the draft in place of this one.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-26
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash -eo pipefail {0}
+    steps:
+      - uses: actions/checkout@v4
+
+      # The version lives in one place, the PPD generator; a tag that disagrees with it would
+      # produce a release whose package calls itself something else.
+      - name: Check the tag against the driver version
+        run: |
+          version="$(sed -n 's/.*driverVersion = "\(.*\)".*/\1/p' Sources/BrotherPDL/PPDGenerator.swift)"
+          if [[ "v$version" != "$GITHUB_REF_NAME" ]]; then
+            echo "tag $GITHUB_REF_NAME does not match driverVersion $version" >&2
+            exit 1
+          fi
+
+      - name: Build (release)
+        run: swift build -c release
+
+      - name: Test
+        run: swift test
+
+      - name: End-to-end through the system filter chain
+        run: scripts/e2e-test.sh
+
+      - name: Build the installer package and the visit kit
+        run: scripts/make-visit-kit.sh
+
+      - name: Open a draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" build/brother-mac-driver-*.pkg build/visit-kit.zip \
+            --draft --generate-notes --title "brother-mac-driver ${GITHUB_REF_NAME#v}" \
+            --notes "Unsigned installer package: macOS will refuse it once; allow it under System Settings → Privacy & Security → Open Anyway. Apple Silicon, macOS 26 or later."
