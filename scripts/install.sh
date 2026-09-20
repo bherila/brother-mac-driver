@@ -6,9 +6,12 @@
 # usage: scripts/install.sh
 #   BUILD_DIR=<dir>          use prebuilt binaries instead of building
 #   CODESIGN_IDENTITY=<name> sign with this identity instead of ad hoc
+#   DRY_RUN=1                build and stage, show what would run as root, install nothing
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
+# shellcheck disable=SC1091
+source "$repo_root/scripts/as-root.sh"
 build_dir="${BUILD_DIR:-$repo_root/.build/release}"
 filter_dest_dir="/Library/Printers/BrotherOSS/filter"
 filter_dest="$filter_dest_dir/rastertobrother"
@@ -48,18 +51,27 @@ for binary in "$work/rastertobrother" "$work/pxltool"; do
     fi
 done
 
-echo "installing filter and PPDs (sudo may prompt for your password)"
-sudo install -o root -g wheel -m 0755 -d "$filter_dest_dir"
-sudo install -o root -g wheel -m 0755 "$work/rastertobrother" "$filter_dest"
-sudo install -o root -g wheel -m 0755 -d "$tool_dest_dir"
-sudo install -o root -g wheel -m 0755 "$work/pxltool" "$tool_dest_dir/pxltool"
-sudo install -o root -g wheel -m 0755 -d "$ppd_dest_dir"
-
 for ppd in "$work"/ppd/Brother-*.ppd; do
-    name="$(basename "$ppd")"
-    gzip -c "$ppd" >"$work/$name.gz"
-    sudo install -o root -g wheel -m 0644 "$work/$name.gz" "$ppd_dest_dir/$name.gz"
+    gzip -c "$ppd" >"$ppd.gz"
 done
+
+# Everything that needs root goes into one script, so there is a single password prompt whichever
+# way it ends up being run. %q keeps the paths safe to paste into it.
+{
+    echo "set -euo pipefail"
+    printf 'install -o root -g wheel -m 0755 -d %q %q %q\n' "$filter_dest_dir" "$tool_dest_dir" "$ppd_dest_dir"
+    printf 'install -o root -g wheel -m 0755 %q %q\n' "$work/rastertobrother" "$filter_dest"
+    printf 'install -o root -g wheel -m 0755 %q %q\n' "$work/pxltool" "$tool_dest_dir/pxltool"
+    for ppd in "$work"/ppd/Brother-*.ppd.gz; do
+        printf 'install -o root -g wheel -m 0644 %q %q\n' "$ppd" "$ppd_dest_dir/$(basename "$ppd")"
+    done
+} >"$work/as-root.sh"
+
+echo "installing the filter, pxltool and PPDs into /Library/Printers"
+run_as_root "$work/as-root.sh"
+if [[ -n "${DRY_RUN:-}" ]]; then
+    exit 0
+fi
 
 cat <<'EOF'
 

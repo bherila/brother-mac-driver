@@ -5,6 +5,8 @@
 set -euo pipefail
 
 pkg_id="io.github.bherila.brother-mac-driver"
+# shellcheck disable=SC1091
+source "$(cd "$(dirname "$0")" && pwd)/as-root.sh"
 filter_root="/Library/Printers/BrotherOSS"
 ppd_dest_dir="/Library/Printers/PPDs/Contents/Resources"
 
@@ -19,25 +21,30 @@ for candidate in "$ppd_dest_dir"/Brother-*.ppd.gz; do
     fi
 done
 
-if [[ -d "$filter_root" ]]; then
-    echo "removing $filter_root"
-    sudo rm -rf "$filter_root"
+work="$(mktemp -d)"
+trap 'rm -rf "$work"' EXIT
+
+# One script for everything that needs root, so there is a single password prompt.
+{
+    echo "set -euo pipefail"
+    if [[ -d "$filter_root" ]]; then
+        printf 'echo removing %q; rm -rf %q\n' "$filter_root" "$filter_root"
+    fi
+    # bash 3.2 (the macOS default) treats "${array[@]}" on an empty array as unbound under set -u.
+    if ((${#ppd_files[@]} > 0)); then
+        for ppd in "${ppd_files[@]}"; do
+            printf 'echo removing %q; rm -f %q\n' "$ppd" "$ppd"
+        done
+    fi
+    if pkgutil --pkg-info "$pkg_id" >/dev/null 2>&1; then
+        printf 'echo forgetting package receipt %q; pkgutil --forget %q >/dev/null\n' "$pkg_id" "$pkg_id"
+    fi
+} >"$work/as-root.sh"
+
+if [[ "$(wc -l <"$work/as-root.sh")" -le 1 ]]; then
+    echo "nothing of this driver is installed"
 else
-    echo "$filter_root not present, skipping"
-fi
-
-# bash 3.2 (the macOS default) treats "${array[@]}" on an empty array as unbound under set -u.
-if ((${#ppd_files[@]} > 0)); then
-    for ppd in "${ppd_files[@]}"; do
-        [[ -e "$ppd" ]] || continue
-        echo "removing $ppd"
-        sudo rm -f "$ppd"
-    done
-fi
-
-if pkgutil --pkg-info "$pkg_id" >/dev/null 2>&1; then
-    echo "forgetting package receipt $pkg_id"
-    sudo pkgutil --forget "$pkg_id"
+    run_as_root "$work/as-root.sh"
 fi
 
 echo
