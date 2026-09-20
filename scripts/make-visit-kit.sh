@@ -58,8 +58,13 @@ cp "$work/two-pages.pdf" "$kit/calibration-two-pages.pdf"
 cp "$repo_root/scripts/collect-logs.sh" "$kit/collect-logs.sh"
 cp "$repo_root/docs/hardware-visit.md" "$kit/CHECKLIST.md"
 
-BUILD_DIR="$bin" "$repo_root/scripts/make-pkg.sh" >/dev/null
-cp "$repo_root"/build/brother-mac-driver-*.pkg "$kit/"
+# Exactly the package just built: build/ may hold installers from earlier versions.
+package="$(BUILD_DIR="$bin" "$repo_root/scripts/make-pkg.sh" | sed -n 's/^built //p')"
+if [[ ! -f "$package" ]]; then
+    echo "make-pkg.sh did not report the package it built" >&2
+    exit 1
+fi
+cp "$package" "$kit/"
 
 (cd "$repo_root/build" && rm -f visit-kit.zip && zip -qr visit-kit.zip visit-kit)
 echo "kit: $kit"
