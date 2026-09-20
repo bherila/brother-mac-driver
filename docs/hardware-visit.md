@@ -17,18 +17,22 @@ alias pxltool=/Library/Printers/BrotherOSS/bin/pxltool
 
 ## 1. Install (prints nothing)
 
-The package is not signed with an Apple Developer ID, so how it got onto the Mac matters:
+The package is not signed with an Apple Developer ID. macOS refuses such a package when the file
+carries a quarantine mark, which anything downloaded (browser, AirDrop, Messages) gets — and the
+mark survives unzipping and usually survives being copied on to a USB stick or a shared folder. So
+a kit that was downloaded at any point should be expected to be refused once. To see:
 
-- **Copied from a USB stick, or over `scp`/file sharing:** macOS does not quarantine it. Open
-  `brother-mac-driver-<version>.pkg` and it installs normally.
-- **Downloaded in a browser, or sent by AirDrop or Messages:** macOS quarantines it and refuses the
-  first attempt. Either open System Settings → Privacy & Security, scroll to the message about the
-  package, choose "Open Anyway" and open it again; or install it from Terminal, which is not expected
-  to apply that check (not yet tried on macOS 26; "Open Anyway" is the fallback):
+```sh
+xattr -p com.apple.quarantine brother-mac-driver-*.pkg    # prints a value if the file is marked
+```
 
-  ```sh
-  sudo installer -pkg brother-mac-driver-*.pkg -target /
-  ```
+If it is refused: open System Settings → Privacy & Security, scroll to the message about the
+package, choose "Open Anyway", and open it again. Or install it from Terminal, which is not expected
+to apply that check (not yet tried on macOS 26; "Open Anyway" is the fallback):
+
+```sh
+sudo installer -pkg brother-mac-driver-*.pkg -target /
+```
 
 Either way it asks for an administrator password, and installs only into `/Library/Printers`.
 

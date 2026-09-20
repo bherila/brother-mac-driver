@@ -42,7 +42,8 @@ scripts/install.sh
 
 Or build an installer package with `scripts/make-pkg.sh`; CI attaches an unsigned one to every run
 as the `brother-mac-driver-pkg` artifact. The package is not signed with an Apple Developer ID. If
-macOS refuses it (it will, when the file was downloaded), allow it once under System Settings →
+macOS refuses it (it will if the file was downloaded at any point, even when it was copied on
+afterwards), allow it once under System Settings →
 Privacy & Security → "Open Anyway", or install it with
 `sudo installer -pkg brother-mac-driver-*.pkg -target /`. Anyone with a Developer ID can produce a
 signed, notarized package: `scripts/make-pkg.sh` takes `CODESIGN_IDENTITY`, `INSTALLER_IDENTITY`
