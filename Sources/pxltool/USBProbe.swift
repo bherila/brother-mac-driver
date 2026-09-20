@@ -27,6 +27,7 @@ extension PxlTool {
         defer { IOObjectRelease(iterator) }
 
         var found = 0
+        var queried = Set<Int>()
         while case let service = IOIteratorNext(iterator), service != 0 {
             defer { IOObjectRelease(service) }
             func property(_ key: String) -> Any? {
@@ -67,7 +68,14 @@ extension PxlTool {
                     write("  \(channel.summary)", to: FileHandle.standardOutput)
                 }
 
-                if queryPJL {
+                // PJL goes to one printer interface per device, the first the registry lists (in practice
+                // interface 0, the printer proper). Further ones - PC-Fax presents itself as a printer -
+                // are listed but left alone.
+                let device = number("locationID") ?? 0
+                let isPrimary = queried.insert(device).inserted
+                if queryPJL && !isPrimary {
+                    write("  (a further interface of a device already queried; PJL not sent)", to: FileHandle.standardOutput)
+                } else if queryPJL {
                     if vendor == brotherVendorID {
                         let reply = try pjlQuery(interface, channels: channels)
                         write("  PJL replies:\n" + (showSerial ? reply : DeviceID.redactingSerial(reply)).split(separator: "\n").map { "    \($0)" }.joined(separator: "\n"), to: FileHandle.standardOutput)

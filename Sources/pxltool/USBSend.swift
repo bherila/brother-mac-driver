@@ -117,6 +117,10 @@ extension PxlTool {
     }
 
     /// The single connected Brother printer's raw interface, or an error naming what was found.
+    ///
+    /// A multifunction device can expose more than one printer-class interface (PC-Fax presents
+    /// itself as a printer too), so interfaces are grouped by the device they belong to and the
+    /// lowest-numbered one, which is the printer proper, is used.
     private static func openTheBrotherPrinter() throws -> (IOUSBHostInterface, String) {
         var iterator: io_iterator_t = 0
         guard IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching("IOUSBHostInterface"), &iterator) == KERN_SUCCESS else {
@@ -124,7 +128,7 @@ extension PxlTool {
         }
         defer { IOObjectRelease(iterator) }
 
-        var brother: [(service: io_service_t, name: String)] = []
+        var brother: [(service: io_service_t, name: String, device: Int, interface: Int)] = []
         var others: [String] = []
         while case let service = IOIteratorNext(iterator), service != 0 {
             func property(_ key: String) -> Any? {
@@ -136,7 +140,8 @@ extension PxlTool {
             let name = property("USB Product Name") as? String ?? property("kUSBProductString") as? String ?? "unknown"
             if number("bInterfaceClass") == 7, number("bInterfaceProtocol") != 4 {
                 if number("idVendor") == brotherVendorID {
-                    brother.append((service, name))
+                    // locationID identifies the physical port, hence the device.
+                    brother.append((service, name, number("locationID") ?? 0, number("bInterfaceNumber") ?? 0))
                     continue
                 }
                 others.append(name)
@@ -145,17 +150,21 @@ extension PxlTool {
         }
         defer { brother.forEach { IOObjectRelease($0.service) } }
 
-        guard brother.count == 1 else {
+        let devices = Set(brother.map(\.device))
+        guard devices.count == 1, let chosen = brother.min(by: { $0.interface < $1.interface }) else {
             let seen = others.isEmpty ? "" : " (other USB printers, which this command will not send to: \(others.joined(separator: ", ")))"
             throw ToolError.message(
                 brother.isEmpty
                     ? "no Brother USB printer is connected\(seen)"
-                    : "\(brother.count) Brother printers are connected; disconnect all but the one to test")
+                    : "\(devices.count) Brother printers are connected; disconnect all but the one to test")
+        }
+        if brother.count > 1 {
+            write("\(chosen.name) has \(brother.count) printer-class interfaces; using interface \(chosen.interface)", to: FileHandle.standardError)
         }
         do {
-            return (try IOUSBHostInterface(__ioService: brother[0].service, options: [], queue: nil, interestHandler: nil), brother[0].name)
+            return (try IOUSBHostInterface(__ioService: chosen.service, options: [], queue: nil, interestHandler: nil), chosen.name)
         } catch {
-            throw ToolError.message("could not open \(brother[0].name): \(error.localizedDescription) (is a print job running? pause its queue first)")
+            throw ToolError.message("could not open \(chosen.name): \(error.localizedDescription) (is a print job running? pause its queue first)")
         }
     }
 
