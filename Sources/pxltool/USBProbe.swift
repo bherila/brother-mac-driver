@@ -96,7 +96,7 @@ extension PxlTool {
         return String(decoding: bytes.dropFirst(2).prefix(max(0, length - 2)), as: UTF8.self)
     }
 
-    private static func isTimeout(_ error: NSError) -> Bool {
+    static func isTimeout(_ error: NSError) -> Bool {
         // kIOReturnTimeout and kIOUSBTransactionTimeout, as the signed 32-bit values IOKit reports.
         [Int(Int32(bitPattern: 0xE000_02D6)), Int(Int32(bitPattern: 0xE000_4051))].contains(error.code)
     }
@@ -117,7 +117,7 @@ extension PxlTool {
 
     /// Every alternate setting of this interface that speaks the raw printer protocols. Printers
     /// commonly offer a send-only setting and a two-way one; only the latter can answer.
-    private static func rawChannels(of interface: IOUSBHostInterface) -> [RawChannel] {
+    static func rawChannels(of interface: IOUSBHostInterface) -> [RawChannel] {
         let configuration = interface.configurationDescriptor
         let number = interface.interfaceDescriptor.pointee.bInterfaceNumber
         var channels: [RawChannel] = []

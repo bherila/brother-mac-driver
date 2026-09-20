@@ -29,6 +29,9 @@ enum PxlTool {
           usb-probe [--pjl yes] [--show-serial yes]
                                             list USB printers, the languages they report, and
                                             whether this driver supports them
+          usb-send <job> [--listen SECONDS] send a ready-made job straight to the one connected
+                                            Brother USB printer and show what it says back
+          redact                            copy stdin to stdout with serial numbers blanked
 
         `file` may be omitted or given as `-` to read the job from standard input.
         """
@@ -53,6 +56,10 @@ enum PxlTool {
                 try testPDF(rest)
             case "usb-probe":
                 try usbProbe(rest)
+            case "usb-send":
+                try usbSend(rest)
+            case "redact":
+                try redact(rest)
             case "-h", "--help", "help":
                 write(usage, to: FileHandle.standardOutput)
             default:
