@@ -71,6 +71,10 @@ extension PxlTool {
                 if Date().timeIntervalSince(since) > 300 {
                     throw ToolError.message("the printer accepted no data for five minutes; gave up after \(offset + sent) of \(job.count) bytes")
                 }
+                // Unread replies are one reason a printer stops taking data, so read before retrying.
+                if let back, backChannelError == nil {
+                    listen(back, timeout: 0.05)
+                }
             }
             offset += sent
             chunks += 1
