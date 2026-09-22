@@ -9,18 +9,19 @@ produced can be recorded and compared against the driver's expectations as indep
 (bherila/brother-mac-driver#27). Field names are libcups's own, from `cups_page_header2_t`, and
 the offsets were taken with `offsetof` against libcups's `<cups/raster.h>`.
 
-The header of every raster version (1, 2 and 3) is stored uncompressed straight after the
-4-byte sync word, whose spelling gives the byte order.
+Versions 2 and 3 store the full 1796-byte `cups_page_header2_t` uncompressed straight after the
+4-byte sync word, whose spelling gives the byte order. Version 1 (`RaSt`) stores only the
+420-byte `cups_page_header_t`, which ends before `cupsPageSize` and `cupsPageSizeName`; reading
+it as a version-2 header would print whatever pixel data follows as if it were those fields, so
+it is refused rather than half-read.
 """
 import struct
 import sys
 
 HEADER_SIZE = 1796
 
-SYNC = {
-    b"RaSt": ">", b"RaS2": ">", b"RaS3": ">",
-    b"tSaR": "<", b"2SaR": "<", b"3SaR": "<",
-}
+SYNC = {b"RaS2": ">", b"RaS3": ">", b"2SaR": "<", b"3SaR": "<"}
+VERSION_1 = {b"RaSt", b"tSaR"}
 
 # name: (offset, struct code, count)
 FIELDS = {
@@ -55,6 +56,8 @@ def main():
     with open(sys.argv[1], "rb") as raster:
         sync = raster.read(4)
         header = raster.read(HEADER_SIZE)
+    if sync in VERSION_1:
+        sys.exit(f"{sys.argv[1]}: a version 1 CUPS raster, whose header lacks the fields recorded here")
     if sync not in SYNC:
         sys.exit(f"{sys.argv[1]}: not a CUPS raster (sync word {sync!r})")
     if len(header) != HEADER_SIZE:

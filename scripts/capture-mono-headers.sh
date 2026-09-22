@@ -87,8 +87,14 @@ for resolution in 600 300; do
         name="$paper-$resolution"
         options="PageSize=$paper Resolution=${resolution}dpi"
         "$pxltool" testpdf --out "$work/$name.pdf" --size "$paper" --gray yes
-        cupsfilter -p "$ppd" -m application/vnd.cups-raster -o "PageSize=$paper" -o "Resolution=${resolution}dpi" \
-            "$work/$name.pdf" >"$work/$name.ras" 2>"$work/$name.cupsfilter.log"
+        # The logs live in $work, which is deleted on exit, so a failure has to show its log here or
+        # CI is left with a bare exit status.
+        if ! cupsfilter -p "$ppd" -m application/vnd.cups-raster -o "PageSize=$paper" -o "Resolution=${resolution}dpi" \
+            "$work/$name.pdf" >"$work/$name.ras" 2>"$work/$name.cupsfilter.log"; then
+            echo "FAIL: $name: cupsfilter failed:" >&2
+            sed 's/^/   /' "$work/$name.cupsfilter.log" >&2
+            exit 1
+        fi
 
         "$header_reader" "$work/$name.ras" >"$work/$name.header"
         # A lookup rather than an associative array: macOS's /bin/bash is 3.2, which has none.
@@ -105,7 +111,11 @@ for resolution in 600 300; do
             continue
         fi
 
-        PPD="$ppd" "$filter" 1 capture "$name" 1 "$options" "$work/$name.ras" >"$work/$name.prn" 2>"$work/$name.filter.log"
+        if ! PPD="$ppd" "$filter" 1 capture "$name" 1 "$options" "$work/$name.ras" >"$work/$name.prn" 2>"$work/$name.filter.log"; then
+            echo "FAIL: $name: rastertobrother failed:" >&2
+            sed 's/^/   /' "$work/$name.filter.log" >&2
+            exit 1
+        fi
         # head first: cutting a pipe short would fail the pipeline under pipefail.
         head -c 2000 "$work/$name.prn" | LC_ALL=C tr -d '\000' >"$work/$name.head"
         pjl() { LC_ALL=C sed -n "s/^@PJL SET $1 = \\([^[:cntrl:]]*\\).*/\\1/p" "$work/$name.head" | head -n 1; }
