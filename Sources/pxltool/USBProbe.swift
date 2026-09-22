@@ -27,7 +27,7 @@ extension PxlTool {
         defer { IOObjectRelease(iterator) }
 
         var found = 0
-        var queried = Set<Int>()
+        let primaryInterfaces = Self.primaryPrinterInterfaces()
         while case let service = IOIteratorNext(iterator), service != 0 {
             defer { IOObjectRelease(service) }
             func property(_ key: String) -> Any? {
@@ -68,11 +68,12 @@ extension PxlTool {
                     write("  \(channel.summary)", to: FileHandle.standardOutput)
                 }
 
-                // PJL goes to one printer interface per device, the first the registry lists (in practice
-                // interface 0, the printer proper). Further ones - PC-Fax presents itself as a printer -
-                // are listed but left alone.
+                // PJL goes to one printer interface per device: the lowest-numbered one, which is the
+                // printer proper. Further ones — PC-Fax presents itself as a printer too — are listed
+                // but left alone. `usb-send` chooses the same way, so what answers here is what a job
+                // goes to.
                 let device = number("locationID") ?? 0
-                let isPrimary = queried.insert(device).inserted
+                let isPrimary = primaryInterfaces[device] == (number("bInterfaceNumber") ?? 0)
                 if queryPJL && !isPrimary {
                     write("  (a further interface of a device already queried; PJL not sent)", to: FileHandle.standardOutput)
                 } else if queryPJL {
@@ -90,6 +91,32 @@ extension PxlTool {
         if found == 0 {
             write("no USB printers found", to: FileHandle.standardOutput)
         }
+    }
+
+    /// The lowest-numbered printer interface of each device, keyed by `locationID` (the physical
+    /// port, hence the device). Enumerating a second time is cheaper than holding every service
+    /// open through the probe, and it keeps this in step with `usb-send`, which picks the same one.
+    private static func primaryPrinterInterfaces() -> [Int: Int] {
+        var iterator: io_iterator_t = 0
+        guard IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching("IOUSBHostInterface"), &iterator) == KERN_SUCCESS else {
+            return [:]
+        }
+        defer { IOObjectRelease(iterator) }
+
+        var lowest: [Int: Int] = [:]
+        while case let service = IOIteratorNext(iterator), service != 0 {
+            defer { IOObjectRelease(service) }
+            func number(_ key: String) -> Int? {
+                (IORegistryEntrySearchCFProperty(
+                    service, kIOServicePlane, key as CFString, kCFAllocatorDefault,
+                    IOOptionBits(kIORegistryIterateRecursively | kIORegistryIterateParents)) as? NSNumber)?.intValue
+            }
+            guard number("bInterfaceClass") == 7, number("bInterfaceProtocol") != 4 else { continue }
+            let device = number("locationID") ?? 0
+            let interface = number("bInterfaceNumber") ?? 0
+            lowest[device] = min(lowest[device] ?? interface, interface)
+        }
+        return lowest
     }
 
     /// GET_DEVICE_ID: class request 0 on the interface; the reply is a big-endian length and the ID string.

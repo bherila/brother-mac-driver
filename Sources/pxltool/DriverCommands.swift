@@ -1,5 +1,6 @@
 import BrotherPDL
 import CCUPS
+import CUPSRaster
 import Foundation
 
 extension PxlTool {
@@ -78,15 +79,15 @@ extension PxlTool {
                 throw ToolError.message("page \(index + 1): raster data ended early")
             }
 
-            // The job places images on the sheet; the raster covers only the imageable area within it.
-            let scale = Double(header.HWResolution.0) / 72
-            let originX = Int((Double(header.cupsImagingBBox.0) * scale).rounded())
-            let originY = Int(((Double(header.cupsPageSize.1) - Double(header.cupsImagingBBox.3)) * scale).rounded())
+            // The job places images on the sheet; the raster covers only the imageable area within
+            // it. This is the filter's own reading of the header, so a disagreement about the
+            // origin shows up as a pixel difference rather than passing quietly.
+            let origin = header.rasterOrigin(dpi: Int(header.HWResolution.0))
             var page = pages[index]
             page.images = page.images.map { image in
                 var shifted = image
-                shifted.x -= originX
-                shifted.y -= originY
+                shifted.x -= origin.x
+                shifted.y -= origin.y
                 return shifted
             }
             let actual = try page.composite(width: width, height: height, format: format)

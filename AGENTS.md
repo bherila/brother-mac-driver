@@ -26,6 +26,7 @@ every model and stays false until a sheet with that model's name on it comes out
 | `Sources/rastertobrother` | The CUPS filter. CUPS raster in, printer bytes out. Everything CUPS-shaped lives here. |
 | `Sources/pxltool` | Developer tool: `dump`, `render`, `compare`, `check`, `ppd`, `testpdf`, `usb-probe`, `usb-send`, `redact`. |
 | `Sources/CCUPS`, `Sources/CCUPSShim` | The system `libcups` and C wrappers for its PPD API, which Swift cannot call directly. |
+| `Sources/CUPSRaster` | Reading a CUPS raster header into a `PageGeometry`. Shared by the filter and `pxltool`, so the two cannot disagree about where on the sheet a page's pixels belong. |
 | `scripts/` | Install, uninstall, package, and the checks below. |
 | `docs/` | What is known about the printers, and the hardware-visit checklist. |
 

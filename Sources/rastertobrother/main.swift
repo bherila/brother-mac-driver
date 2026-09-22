@@ -1,5 +1,6 @@
 import BrotherPDL
 import CCUPS
+import CUPSRaster
 import Foundation
 
 // CUPS filter: argv = job-id user title copies options [file]
