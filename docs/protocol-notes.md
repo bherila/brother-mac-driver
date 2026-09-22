@@ -48,16 +48,55 @@ and can switch all of them off together.
 
 ## XL2HB (not implemented)
 
-- Stream header is `) BROTHER XL2HB;…` — the shape of a PCL XL stream header with a different
-  name, so the body is probably a PCL XL-style tagged binary stream.
-- The host does colour conversion and halftoning. The Linux filter ships per-plane dither tables
-  for C, M, Y and K, in normal and toner-save variants, for a 600 dpi mode and a "CAPT"
-  (2400-dpi-class) mode, plus colour-matching tables named `Match Monitor`, `Vivid` and `None`.
-- Media type is carried inside the stream, not in PJL: `dRegular`, `dThin`, `dThick`, `dThick2`,
-  `dBond`, `dRecycled`, `dEnvelopes`, `dEnvthin`, `dEnvthick`, `dPostcard`, `dLabel`, `dGlossy`,
-  `dTransparency`.
-- The Linux filter is a self-contained i386 executable (libc and libm only) that reads a PPM
-  stream and writes the job, which makes it usable as a byte-exact reference under emulation.
+Everything below was read out of Brother's own Linux filter for the HL-3140CW, by running it and
+decoding what it produced. `scripts/xl2hb-reference.sh` reproduces any of it: it fetches the
+driver package (checksum-pinned, nothing of Brother's is kept in this repository), runs a PPM
+through the filter and blanks the `JOBTIME` line, which is the only part of the output that is not
+a function of the input. Two runs of the same page are then byte-identical, so the filter answers
+"what should these pixels encode to" exactly. It is a 32-bit x86 binary needing only libc and
+libm, so it runs on a Linux x86 host with the 32-bit loader installed, or under `qemu-i386-static`.
+
+**The body is PCL XL's tag encoding.** Not merely "PCL XL-shaped": the same data tags, the same
+`0xF8` attribute prefix, the same attribute numbers and the same operator codes. `PCLXLReader`
+parses a Brother XL2HB job end to end with no changes, and `pxltool dump` disassembles one. The
+stream header is `) BROTHER XL2HB;1;0` — protocol class 1.0, where this driver's PCL XL is 2.0.
+
+A single-page job from the filter decodes to:
+
+```
+BeginSession    Measure=inch UnitsPerMeasure=[600, 600]
+OpenDataSource  SourceType=default DataOrg=binaryLowByteFirst
+BeginPage       Orientation=0 MediaSource=1 MediaSize=0 MediaType="dRegular" SimplexPageMode=0
+SetPageOrigin   attr42=[100, 100]
+BeginImage      ColorMapping=0 ColorDepth=0 SourceWidth=4928 SourceHeight=6400
+                DestinationSize=[4928, 6400] CommentData=[…] PageCopies=0
+ReadImage       StartLine=… BlockHeight=… CompressMode=1 CommentData=<plane> data=…
+…
+EndImage / EndPage / CloseDataSource / EndSession
+```
+
+- `ColorDepth=0` is 1 bit per pixel, so the planes arrive already halftoned — the host does the
+  colour conversion and the screening, which is what the per-plane dither tables in the package
+  are for (C, M, Y, K, in normal and toner-save variants, for a 600 dpi and a "CAPT" 2400-dpi-class
+  mode, plus colour-matching tables named `Match Monitor`, `Vivid` and `None`).
+- `CommentData` on `ReadImage` is the **colour plane**: 0 is black, 1 cyan, 2 magenta, 3 yellow. A
+  cyan page emits a plane-1 block, a red one emits planes 2 and 3, and a page with only neutral
+  content emits plane 0 alone — planes with no ink on them are not sent at all. Plane 0 is always
+  sent, in full-page blocks (2249 + 2249 + 1902 rows for a 6400-row page).
+- `CommentData` on `BeginImage` is an integer array that appears to describe the planes that
+  follow; its exact meaning is **not worked out yet**.
+- `SetPageOrigin` carries attribute 42, which this driver does not name, as [100, 100] — 100 units
+  at 600 per inch is the 12 pt unprintable margin documented below.
+- `MediaType` travels inside the stream as a `ubyteArray` string, not in PJL: `dRegular`, `dThin`,
+  `dThick`, `dThick2`, `dBond`, `dRecycled`, `dEnvelopes`, `dEnvthin`, `dEnvthick`, `dPostcard`,
+  `dLabel`, `dGlossy`, `dTransparency`.
+- `CompressMode=1` is RLE, the same compression this driver already encodes and decodes for PCL XL.
+
+**What this means for implementing it:** the framing, the tag writer, the RLE encoder and the
+reader are all already in `BrotherPDL` and appear to apply unchanged. What is genuinely new is the
+colour path — RGB to CMYK, then halftoning against Brother's dither tables — and the meaning of
+`BeginImage`'s `CommentData`. **Unconfirmed:** everything here comes from one model's filter and
+one set of synthetic pages; none of it has been sent to a printer.
 
 ## PCL XL, as emitted by this driver
 

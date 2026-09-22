@@ -89,6 +89,11 @@ repository's own `Package.swift`.
 
 A change to an encoder that no check notices is a change without evidence. Add the check.
 
+`scripts/xl2hb-reference.sh` is not a check but a source of evidence: it runs Brother's own Linux
+filter as a byte-exact reference for XL2HB ([#21](https://github.com/bherila/brother-mac-driver/issues/21)),
+which is how the facts in `docs/protocol-notes.md` about that format were established. It needs a
+Linux x86 host and so is deliberately outside CI.
+
 ## Conventions
 
 - Comments say **why**, not what. A comment that restates the code is noise; one that records a
