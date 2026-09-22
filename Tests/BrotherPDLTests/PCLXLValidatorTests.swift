@@ -307,10 +307,10 @@ private func handBuiltJob(
     padBytesMultiple: Int? = nil, imageWidth: Int = 6, imageHeight: Int = 2,
     colorDepth: PCLXLColorDepth = .bits8, orientation: PCLXLOrientation = .portrait,
     cursor: (x: Int, y: Int) = (x: 0, y: 0), pageOrigin: (x: Int, y: Int)? = nil,
-    realCursor: (x: Float, y: Float)? = nil, realDestination: (x: Float, y: Float)? = nil,
+    customMediaSize: (x: Float, y: Float)? = nil,
     dataBytes: Int? = nil, protocolClass: (major: Int, minor: Int) = (major: 2, minor: 0),
     compressMode: PCLXLCompressMode = .none, payload: [UInt8]? = nil,
-    beforeSession: [UInt8] = [], afterSession: [UInt8] = [],
+    beforeSession: [UInt8] = [], afterSession: [UInt8] = [], insidePage: [UInt8] = [],
     beforeImage: ((inout PCLXLWriter) -> Void)? = nil,
     insideImage: ((inout PCLXLWriter) -> Void)? = nil
 ) -> [UInt8] {
@@ -330,31 +330,32 @@ private func handBuiltJob(
     writer.enumeration(PCLXLDataOrg.binaryLowByteFirst, .dataOrg)
     writer.op(.openDataSource)
     writer.enumeration(orientation, .orientation)
-    writer.enumeration(PCLXLMediaSize.letter, .mediaSize)
+    if let customMediaSize {
+        writer.real32XY(customMediaSize.x, customMediaSize.y, .customMediaSize)
+        writer.ubyte(0, .customMediaSizeUnits)
+    } else {
+        writer.enumeration(PCLXLMediaSize.letter, .mediaSize)
+    }
     writer.enumeration(PCLXLSimplexPageMode.frontSide, .simplexPageMode)
     writer.op(.beginPage)
     if let pageOrigin {
-        writer.uint16XY(pageOrigin.x, pageOrigin.y, .point)
+        writer.uint16XY(pageOrigin.x, pageOrigin.y, .pageOrigin)
         writer.op(.setPageOrigin)
     }
     beforeImage?(&writer)
+    if !insidePage.isEmpty {
+        job += writer.take()
+        job += insidePage
+    }
     writer.enumeration(PCLXLColorSpace.gray, .colorSpace)
     writer.op(.setColorSpace)
-    if let realCursor {
-        writer.real32XY(realCursor.x, realCursor.y, .point)
-    } else {
-        writer.uint16XY(cursor.x, cursor.y, .point)
-    }
+    writer.uint16XY(cursor.x, cursor.y, .point)
     writer.op(.setCursor)
     writer.enumeration(PCLXLColorMapping.directPixel, .colorMapping)
     writer.enumeration(colorDepth, .colorDepth)
     writer.uint16(imageWidth, .sourceWidth)
     writer.uint16(imageHeight, .sourceHeight)
-    if let realDestination {
-        writer.real32XY(realDestination.x, realDestination.y, .destinationSize)
-    } else {
-        writer.uint16XY(imageWidth, imageHeight, .destinationSize)
-    }
+    writer.uint16XY(imageWidth, imageHeight, .destinationSize)
     writer.op(.beginImage)
     insideImage?(&writer)
 
@@ -631,16 +632,23 @@ extension UInt32 {
         #expect(rules(PCLXLValidator.check(job: job)).contains("pjl-enter-language"))
     }
 
-    @Test func aFractionalCoordinateIsNotRoundedIntoTheMargin() {
-        // Rounding the cursor and the destination apart moves the edge: 5098.5 + 1.5 lands exactly
-        // on a 5100-unit Letter sheet, where 5099 + 2 would be reported off it.
-        let job = handBuiltJob(imageWidth: 2, realCursor: (x: 5098.5, y: 10.5), realDestination: (x: 1.5, y: 2.5))
-        let findings = PCLXLValidator.check(job: job)
-        #expect(!rules(findings).contains("image-off-sheet"), "\(findings)")
+    @Test func aFractionalSheetIsNotRoundedIntoAcceptingAnOverrun() {
+        // `CustomMediaSize` is the geometry input HP documents as taking real32XY, so it is where
+        // a legally encoded fractional sheet comes from. Cursor and destination are integers by
+        // schema, which is why the earlier version of this test — a real32XY cursor and
+        // destination — was arithmetic exercised through an encoding no printer reads.
+        //
+        // CustomMediaSize is given in its own measure — inches here — so at 600 units to the inch
+        // 8.49983 in is a sheet 5099.898 units across. An image 5100 units wide overruns it by a
+        // tenth of a unit, and rounding the sheet up to 5100 first would accept it.
+        let over = handBuiltJob(imageWidth: 5100, customMediaSize: (x: 8.49983, y: 11))
+        let overFindings = PCLXLValidator.check(job: over)
+        #expect(rules(overFindings).contains("image-off-sheet"), "\(overFindings)")
 
-        // Half a unit further and it genuinely does not fit.
-        let over = handBuiltJob(imageWidth: 2, realCursor: (x: 5099.0, y: 10.5), realDestination: (x: 1.5, y: 2.5))
-        #expect(rules(PCLXLValidator.check(job: over)).contains("image-off-sheet"))
+        // The control: the same image on a sheet that really is 5100 units wide fits exactly.
+        let fits = handBuiltJob(imageWidth: 5100, customMediaSize: (x: 8.5, y: 11))
+        let findings = PCLXLValidator.check(job: fits)
+        #expect(!rules(findings).contains("image-off-sheet"), "\(findings)")
     }
 }
 
@@ -664,16 +672,25 @@ extension UInt32 {
         #expect(errors(findings).contains { $0.rule == "session" }, "\(findings)")
     }
 
-    @Test func eB5PaperIsReportedAsSomethingThisDriverDoesNotSendRatherThanAsInvalid() {
-        // Code 13 is a defined MediaSize a printer accepts, so it is worth saying that the job did
-        // not come from here without claiming the printer would reject it.
-        let job = patched(
-            handBuiltJob(),
-            replacing: ubyteAttribute(PCLXLMediaSize.letter.rawValue, .mediaSize),
-            with: ubyteAttribute(13, .mediaSize))
-        let findings = PCLXLValidator.check(job: job)
-        #expect(rules(findings).contains("media-size"))
-        #expect(errors(findings).isEmpty, "\(findings)")
+    @Test func eB5PaperIsAcceptedOnlyByTheClassThatDefinesIt() {
+        // 13 is a class 2.1 addition. Treating it as legal everywhere accepts a value a 2.0
+        // interpreter has never heard of; treating it as invalid everywhere rejects a legal 2.1
+        // job. Both were wrong in earlier rounds, in that order.
+        func withEB5(protocolClass: (major: Int, minor: Int)) -> [UInt8] {
+            patched(
+                handBuiltJob(protocolClass: protocolClass),
+                replacing: ubyteAttribute(PCLXLMediaSize.letter.rawValue, .mediaSize),
+                with: ubyteAttribute(13, .mediaSize))
+        }
+
+        // 2.0: not a value of this attribute.
+        let old = PCLXLValidator.check(job: withEB5(protocolClass: (2, 0)))
+        #expect(rules(old).contains("attribute-value"))
+
+        // 2.1: legal, and only worth saying that this driver spells JIS B5 as 11.
+        let new = PCLXLValidator.check(job: withEB5(protocolClass: (2, 1)))
+        #expect(rules(new).contains("media-size"))
+        #expect(errors(new).isEmpty, "\(new)")
     }
 
     @Test func twoDuplexPagesOnTheSameSideAreReported() throws {
@@ -703,7 +720,7 @@ extension UInt32 {
         let job = handBuiltJob(compressMode: .rle, payload: [0x00, 0x41])
         let findings = PCLXLValidator.check(job: job)
         #expect(rules(findings).contains("image-data-length"))
-        #expect(findings.first { $0.rule == "image-data-length" }?.message.contains("decodes to 1 bytes") == true)
+        #expect(findings.first { $0.rule == "image-data-length" }?.message.contains("holds 1 bytes of image") == true)
     }
 
     @Test func aWellFormedCompressedBlockPasses() {
@@ -714,5 +731,187 @@ extension UInt32 {
         let job = handBuiltJob(compressMode: .rle, payload: compressed)
         let findings = PCLXLValidator.check(job: job)
         #expect(findings.isEmpty, "\(findings)")
+    }
+}
+
+// MARK: - Findings from the owner's review
+
+/// The bytes the writer emits for one attribute, so a test can name a wire encoding rather than
+/// describe it. These fixtures exist because the implementation and the tests shared a wrong
+/// premise about SetPageOrigin's operand, and agreeing with each other hid it.
+private func attributeBytes(_ write: (inout PCLXLWriter) -> Void) -> [UInt8] {
+    var writer = PCLXLWriter()
+    write(&writer)
+    return writer.take()
+}
+
+@Suite struct PCLXLValidatorSchemaTests {
+    @Test func setPageOriginCarriesAttribute42() {
+        // Literal, not `PCLXLAttribute.pageOrigin`: if the enum were wrong again, a test written
+        // in terms of the enum would agree with it.
+        let job = handBuiltJob(pageOrigin: (x: 10, y: 10))
+        let origin = attributeBytes { $0.uint16XY(10, 10, .pageOrigin) }
+        #expect(origin.last == 42)
+        #expect(job.firstRange(of: origin) != nil, "the job does not carry PageOrigin as attribute 42")
+        #expect(PCLXLValidator.check(job: job).isEmpty)
+    }
+
+    @Test func setPageOriginWithPointIsRejected() {
+        // Point (76) is SetCursor's operand. On SetPageOrigin it is an attribute the operator does
+        // not take, and the operand it does take is then missing.
+        let job = patched(
+            handBuiltJob(pageOrigin: (x: 10, y: 10)),
+            replacing: attributeBytes { $0.uint16XY(10, 10, .pageOrigin) },
+            with: attributeBytes { $0.uint16XY(10, 10, .point) })
+        let rulesReported = rules(PCLXLValidator.check(job: job))
+        #expect(rulesReported.contains("attribute-unknown"))
+        #expect(rulesReported.contains("attribute-missing"))
+    }
+
+    @Test func aPositionIsNotSentAsAReal() {
+        // Point takes ubyteXY, uint16XY or sint16XY. real32XY is an encoding no printer is
+        // documented to read there, however sensible the number in it looks.
+        let job = patched(
+            handBuiltJob(),
+            replacing: attributeBytes { $0.uint16XY(0, 0, .point) },
+            with: attributeBytes { $0.real32XY(0, 0, .point) })
+        #expect(rules(PCLXLValidator.check(job: job)).contains("attribute-type"))
+    }
+
+    @Test func destinationSizeIsUint16XYOnly() {
+        let job = patched(
+            handBuiltJob(),
+            replacing: attributeBytes { $0.uint16XY(6, 2, .destinationSize) },
+            with: attributeBytes { $0.real32XY(6, 2, .destinationSize) })
+        #expect(rules(PCLXLValidator.check(job: job)).contains("attribute-type"))
+    }
+
+    @Test func customMediaSizeMayBeReal() {
+        // The one geometry attribute that is documented as taking real32XY, so it must not be
+        // caught by the tightening above.
+        let job = handBuiltJob(customMediaSize: (x: 8.5, y: 11))
+        let findings = PCLXLValidator.check(job: job)
+        #expect(findings.isEmpty, "\(findings)")
+    }
+}
+
+@Suite struct PCLXLValidatorProtocolClassTests {
+    @Test func jpegIsAClassTwoZeroCompression() {
+        // DeltaRow is what class 2.1 added. JPEG has been there since 2.0, so a 2.0 stream using
+        // it is not a version violation — whatever else this driver thinks of JPEG.
+        let job = handBuiltJob(protocolClass: (2, 0), compressMode: .jpeg, payload: [0xFF, 0xD8, 0xFF, 0xD9])
+        #expect(!rules(PCLXLValidator.check(job: job)).contains("compress-mode-class"))
+    }
+
+    @Test func deltaRowStillNeedsClassTwoOne() {
+        let job = handBuiltJob(protocolClass: (2, 0), compressMode: .deltaRow, payload: [0x00, 0x00])
+        #expect(rules(PCLXLValidator.check(job: job)).contains("compress-mode-class"))
+    }
+
+    @Test func theDefaultOrientationIsAClassTwoOneValue() {
+        let job = { (major: Int, minor: Int) in
+            patched(
+                handBuiltJob(protocolClass: (major, minor)),
+                replacing: ubyteAttribute(PCLXLOrientation.portrait.rawValue, .orientation),
+                with: ubyteAttribute(4, .orientation))
+        }
+        #expect(rules(PCLXLValidator.check(job: job(2, 0))).contains("attribute-value"))
+        #expect(!rules(PCLXLValidator.check(job: job(2, 1))).contains("attribute-value"))
+    }
+
+    @Test func classTwoOneNeedNotNameAnOrientation() {
+        // 2.1 lets BeginPage omit Orientation; 2.0 does not.
+        let job = { (major: Int, minor: Int) in
+            patched(
+                handBuiltJob(protocolClass: (major, minor)),
+                replacing: ubyteAttribute(PCLXLOrientation.portrait.rawValue, .orientation), with: [])
+        }
+        #expect(rules(PCLXLValidator.check(job: job(2, 0))).contains("attribute-missing"))
+        #expect(!rules(PCLXLValidator.check(job: job(2, 1))).contains("attribute-missing"))
+    }
+
+    @Test func anExternalTrayIsAMediaSource() {
+        // 0…7 are the named sources and 8…255 are external trays, which a printer with a finisher
+        // attached really does report.
+        let job = handBuiltJob(beforeImage: { _ in })
+        let withTray = patched(
+            job, replacing: ubyteAttribute(PCLXLSimplexPageMode.frontSide.rawValue, .simplexPageMode),
+            with: ubyteAttribute(200, .mediaSource) + ubyteAttribute(PCLXLSimplexPageMode.frontSide.rawValue, .simplexPageMode))
+        #expect(!rules(PCLXLValidator.check(job: withTray)).contains("attribute-value"))
+    }
+}
+
+@Suite struct PCLXLValidatorGeometryClaimTests {
+    @Test func anOffSheetImageIsClippedNotRejected() {
+        // PCL XL confines painting to the clipping region; it does not refuse the job. So this is
+        // a fact about our output, not a prediction about the printer — and `check` must not exit
+        // non-zero on a capture from a driver entitled to do it.
+        let pushedOff = handBuiltJob(pageOrigin: (x: 5099, y: 10))
+        let findings = PCLXLValidator.check(job: pushedOff)
+        let offSheet = try? #require(findings.first { $0.rule == "image-off-sheet" })
+        #expect(offSheet?.severity == .warning)
+        #expect(offSheet?.category == .policy)
+        #expect(!findings.hasErrors, "\(findings)")
+        // It is still fatal for a job this driver wrote, which is what CI checks.
+        #expect(findings.hasPolicyViolations)
+    }
+
+    @Test func anUnmodelledOperatorStopsTheSheetClaims() {
+        // 0x79 is not an operator this validator follows. It could be a scale or a rotation, and
+        // nothing in the tag says otherwise, so continuing to do arithmetic about where the image
+        // lands would be stating a conclusion about a page that no longer exists.
+        let job = handBuiltJob(pageOrigin: (x: 5099, y: 10), insidePage: [0x79])
+        let findings = PCLXLValidator.check(job: job)
+        let offSheet = findings.filter { $0.rule == "image-off-sheet" }
+        #expect(offSheet.allSatisfy { $0.category == .coverage }, "\(offSheet)")
+        #expect(!offSheet.isEmpty, "the skipped check should still be reported")
+    }
+}
+
+@Suite struct PCLXLValidatorBlockSizeTests {
+    @Test func aHugeBlockIsMeasuredRatherThanBuilt() {
+        // 65535 × 65535 is inside every range the schema allows, and at 8 bits a pixel it is a
+        // 4 GiB image. The payload is 131070 bytes: two per row, each row saying "unchanged".
+        // Asking a decoder how big that is means allocating it, which is how a validator becomes
+        // the thing that brings the machine down. This must answer from the encoding alone.
+        let rows = 65535
+        let payload = [UInt8](repeating: 0, count: rows * 2)
+        let job = handBuiltJob(
+            imageWidth: 65535, imageHeight: rows, protocolClass: (2, 1), compressMode: .deltaRow,
+            payload: payload)
+        let findings = PCLXLValidator.check(job: job)
+        // Every row is present — "unchanged from the seed" is a row — so there is nothing wrong
+        // with its length. The point of the test is that we got here at all.
+        #expect(!rules(findings).contains("image-data-length"), "\(findings.prefix(4))")
+    }
+
+    @Test func aTruncatedHugeBlockIsReportedWithoutBuildingIt() {
+        // The same declared geometry, with the rows cut short: reported, still without allocating.
+        let job = handBuiltJob(
+            imageWidth: 65535, imageHeight: 65535, protocolClass: (2, 1), compressMode: .deltaRow,
+            payload: [0x00, 0x00, 0x00, 0x00])
+        #expect(rules(PCLXLValidator.check(job: job)).contains("image-data-length"))
+    }
+
+    @Test func anRLEBlockThatDecodesLongIsAccepted() {
+        // Recorded deliberately rather than left to fall out of a comparison: nothing here
+        // establishes that a printer refuses a block decoding to more than its rows need, only
+        // that one decoding to less cannot fill them. If evidence turns up, this test is where
+        // the decision changes.
+        var payload: [UInt8] = []
+        let rows = [UInt8](repeating: 0x80, count: 8 * 2 + 16)
+        rows.withUnsafeBytes { PCLXLRLE.encode($0, into: &payload) }
+        let job = handBuiltJob(compressMode: .rle, payload: payload)
+        let findings = PCLXLValidator.check(job: job)
+        #expect(!rules(findings).contains("image-data-length"), "\(findings)")
+    }
+
+    @Test func aJPEGBlockIsReportedAsUnchecked() {
+        // Legal in class 2.0 and not something this validator reads. Saying nothing would let it
+        // pass as verified; saying "error" would claim the printer rejects a block we did not read.
+        let job = handBuiltJob(compressMode: .jpeg, payload: [0xFF, 0xD8, 0xFF, 0xD9])
+        let findings = PCLXLValidator.check(job: job)
+        #expect(findings.contains { $0.rule == "image-data-length" && $0.category == .coverage })
+        #expect(!findings.hasErrors, "\(findings)")
     }
 }

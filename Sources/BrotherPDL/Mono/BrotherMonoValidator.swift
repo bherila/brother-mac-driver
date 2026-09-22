@@ -28,15 +28,32 @@ public enum BrotherMonoValidator {
     /// the left and right — so the paper name fixes the row width exactly. A header that disagrees
     /// with the rows it introduces produces a garbled page, and nothing else here would notice,
     /// because the raster is internally consistent either way.
-    public static func bytesPerRow(paper: String?, resolution: String?) -> Int? {
+    /// `ras1200Mode` is the `RAS1200MODE` the header set, which is not a detail that can be left
+    /// out: brlaser asks for a 1200 dpi raster by setting it `TRUE` and leaving `RESOLUTION` at
+    /// 600, so reading `RESOLUTION` alone makes a Letter page 621 bytes across where it is really
+    /// 1242, and the width check then reports a correct job as garbled.
+    ///
+    /// Returns nil where the width cannot be worked out — an unreadable figure, or a paper with no
+    /// PJL name in this driver's table (COM10 and the postcards are in the value table but have no
+    /// mapping, so they land here). Nil means the row width is not checked, which is the right
+    /// answer when it is not known.
+    public static func bytesPerRow(paper: String?, resolution: String?, ras1200Mode: String? = nil) -> Int? {
         // A page header is only as trustworthy as the job it came from: a resolution of
         // 9223372036854775807 parses as an Int and then overflows the conversion below, so the
-        // range is bounded here rather than trusted. 1200 covers this family's RAS1200MODE.
-        guard let paper, let resolution, let dpi = Int(resolution), (1...1200).contains(dpi),
+        // range is bounded here rather than trusted. This is a guard against arithmetic on a
+        // malformed header, not a statement about what the hardware does.
+        guard let paper, let resolution, let stated = Int(resolution), (1...1200).contains(stated),
             let size = MediaSize.all.first(where: { BrotherMonoBackend.pjlPaper($0) == paper })
         else {
             return nil
         }
+        switch ras1200Mode {
+        case "TRUE", "FALSE", nil: break
+        // A mode this driver does not know is a mode that may scale the raster, so the width is
+        // not something to be confident about.
+        default: return nil
+        }
+        let dpi = ras1200Mode == "TRUE" ? 1200 : stated
         let printablePoints = size.widthPoints - 2 * 8
         let pixels = Int((printablePoints * Double(dpi) / 72).rounded())
         return (pixels + 7) / 8
@@ -216,7 +233,8 @@ private struct Scan {
         pclReset()
         configured = true
         headerBytesPerRow = BrotherMonoValidator.bytesPerRow(
-            paper: settings["PAPER"], resolution: settings["RESOLUTION"])
+            paper: settings["PAPER"], resolution: settings["RESOLUTION"],
+            ras1200Mode: settings["RAS1200MODE"])
     }
 
 
@@ -254,7 +272,11 @@ private struct Scan {
         while offset < bytes.count {
             if take(Self.rasterEnd) {
                 if lines == 0 {
-                    warning("page", "page \(pages) carries no raster lines", at: start)
+                    // A page with nothing on it is a blank sheet, which is what the printer should receive when
+                    // the rasteriser pads a duplex job to an even page count — and also what it receives when a
+                    // page's raster was dropped. Nothing in the job distinguishes the two, so this reports the
+                    // fact without calling it a fault.
+                    coverage("page", "page \(pages) carries no raster lines", at: start)
                 }
                 if !take([Self.formFeed]) {
                     error("page", "page \(pages) is not followed by a form feed, so the sheet never ejects", at: offset)
@@ -352,7 +374,11 @@ private struct Scan {
         // nor any comparison against the raster — would notice, because both sides agree.
         if let width = bytesPerRow, let expected = headerBytesPerRow, width != expected, !reportedWidthMismatch {
             reportedWidthMismatch = true
-            error(
+            // The printer takes this job and prints a garbled page; it does not refuse it. So this
+            // is the same kind of finding as a PCL XL image hanging off the sheet — a statement
+            // about output this driver should not produce, not a prediction of rejection. CI holds
+            // our own jobs to it through `--fail-on policy`.
+            warning(
                 "raster-width",
                 "rows are \(width) bytes where the page header's paper and resolution imply \(expected)",
                 at: start)
@@ -517,6 +543,10 @@ private struct Scan {
 
     private mutating func error(_ rule: String, _ message: String, at offset: Int? = nil) {
         findings.append(.error(rule, message, at: offset ?? self.offset))
+    }
+
+    private mutating func coverage(_ rule: String, _ message: String, at offset: Int? = nil) {
+        findings.append(.coverage(rule, message, at: offset ?? self.offset))
     }
 
     private mutating func warning(_ rule: String, _ message: String, at offset: Int? = nil) {

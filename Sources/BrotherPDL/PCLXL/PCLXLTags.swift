@@ -48,6 +48,9 @@ public enum PCLXLAttribute: UInt8, Sendable, CaseIterable {
     case mediaSource = 38
     case mediaType = 39
     case orientation = 40
+    /// SetPageOrigin's operand. Not `Point` (76): HP gives SetPageOrigin its own attribute, and
+    /// Brother's own XL2HB output uses 42 here too.
+    case pageOrigin = 42
     case customMediaSize = 47
     case customMediaSizeUnits = 48
     case pageCopies = 49

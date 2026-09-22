@@ -15,28 +15,53 @@ if [[ "$want" != "present" && "$want" != "absent" ]]; then
     exit 64
 fi
 
+# Two ways to get this wrong, and the second is the dangerous one.
+#
 # `lpinfo -m | grep -q` looks right and is a trap: grep exits at its first match, lpinfo dies of
 # SIGPIPE, and under `set -o pipefail` the pipeline then reports failure even though the driver was
-# found. That reads as "absent" — which would make the check after uninstalling pass while the
-# driver is still installed. So the listing is taken once and searched without a pipe.
+# found. So the listing is taken once and searched without a pipe.
+#
+# `lpinfo ... || true` is the same trap wearing a different hat: it turns a failed query into an
+# empty listing, an empty listing has no match, and no match reads as "absent". A cupsd that is not
+# answering would then certify that uninstalling worked. A query that did not run proves nothing
+# either way, so it is kept apart from a query that ran and found nothing.
+#
+# 0 = listed, 1 = ran and did not list it, 2 = the query itself failed.
 driver_listed() {
     local listing
-    listing="$(lpinfo -m 2>/dev/null || true)"
+    if ! listing="$(lpinfo -m 2>/dev/null)"; then
+        return 2
+    fi
     grep -q "brother-mac-driver" <<<"$listing"
 }
 
 elapsed=0
+query_failures=0
 while true; do
-    found=0
-    driver_listed && found=1
-    if [[ "$want" == "present" && "$found" -eq 1 ]] || [[ "$want" == "absent" && "$found" -eq 0 ]]; then
+    # `driver_listed || status=$?` and not `driver_listed && x || y`: the latter reports the status
+    # of the whole `&&` list, so "ran, found nothing" comes back looking like "found it".
+    status=0
+    driver_listed || status=$?
+    case "$status" in
+        0) state=present ;;
+        1) state=absent ;;
+        # Keep retrying — cupsd may be restarting — but never let this count as an answer.
+        *) state=unknown; query_failures=$((query_failures + 1)) ;;
+    esac
+    if [[ "$state" == "$want" ]]; then
         echo "the print system reports this driver as $want"
         exit 0
     fi
     if ((elapsed >= timeout_seconds)); then
-        echo "after ${timeout_seconds}s the print system still does not report this driver as $want" >&2
-        brother="$(lpinfo -m 2>/dev/null || true)"
-        grep -i brother <<<"$brother" || echo "  (no Brother drivers listed at all)" >&2
+        if ((query_failures > 0)); then
+            echo "lpinfo -m failed on $query_failures of the last attempts, so whether this driver is" >&2
+            echo "$want was never established. Treating that as unknown, not as $want." >&2
+        else
+            echo "after ${timeout_seconds}s the print system still does not report this driver as $want" >&2
+            if brother="$(lpinfo -m 2>/dev/null)"; then
+                grep -i brother <<<"$brother" || echo "  (no Brother drivers listed at all)" >&2
+            fi
+        fi
         exit 1
     fi
     sleep 2

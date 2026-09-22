@@ -76,8 +76,10 @@ for entry in "${cases[@]}"; do
         failures=$((failures + 1))
     fi
 
-    # Preflight: what a printer would reject, which no amount of pixel comparison can see.
-    if ! "$pxltool" check "$work/$name.pxl" 2>"$work/$name.check"; then
+    # Preflight: what a printer would reject and what this driver should not have emitted, neither
+    # of which any amount of pixel comparison can see. These are our own jobs, so policy findings
+    # are failures here — an image clipped off the sheet is a bug even though PCL XL allows it.
+    if ! "$pxltool" check --fail-on policy "$work/$name.pxl" 2>"$work/$name.check"; then
         echo "FAIL: preflight rejected the job" >&2
         cat "$work/$name.check" >&2
         failures=$((failures + 1))
@@ -160,7 +162,7 @@ fi
 echo "   $(grep -m1 "ERROR" "$work/badpage.filter.log" || echo "(the filter logged no ERROR line)")"
 # The point of closing the job on the way out is that what did go to the printer is still a
 # complete, well-formed job, so the preflight has to accept it.
-if ! "$pxltool" check "$work/badpage.pxl" >/dev/null 2>"$work/badpage.check"; then
+if ! "$pxltool" check --fail-on policy "$work/badpage.pxl" >/dev/null 2>"$work/badpage.check"; then
     echo "FAIL: the job left behind by an unprintable page is not well-formed" >&2
     cat "$work/badpage.check" >&2
     failures=$((failures + 1))

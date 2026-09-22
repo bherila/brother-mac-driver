@@ -2,7 +2,7 @@ import BrotherPDL
 import Foundation
 
 extension PxlTool {
-    /// `pxltool check [file] [--bytes-per-row N] [--strict yes]`
+    /// `pxltool check [file] [--bytes-per-row N] [--fail-on errors|policy|all]`
     ///
     /// Reads a finished print job and checks it against the rules a printer enforces: the PJL
     /// wrapper, the stream or page framing, every operator's attributes, the row accounting of
@@ -10,12 +10,19 @@ extension PxlTool {
     /// is what `compare` is for — so this works on a job captured from a queue, where the raster
     /// it came from is long gone.
     ///
-    /// Exits non-zero when a printer would be entitled to reject the job, so a script can gate on
-    /// it. `--strict yes` also fails on warnings: legal jobs that this driver should not produce.
+    /// What counts as failure depends on whose job it is, which is what `--fail-on` picks:
+    ///
+    /// - `errors` (the default) fails only where the job breaks the printer language. Right for a
+    ///   capture from another driver, which is entitled to use the language differently.
+    /// - `policy` also fails on legal output this driver should not have produced — an image
+    ///   reaching off the sheet, a page scaled, a PJL spelling from the wrong family. Right for a
+    ///   job this driver wrote, which is what CI checks.
+    /// - `all` additionally fails on the checks that were not made, which is a way of asking
+    ///   whether a job uses anything this validator does not model.
     static func check(_ arguments: [String]) throws -> Int32 {
         var options = Options()
-        try options.parse(arguments, allowed: ["--bytes-per-row", "--strict"])
-        let strict = options.values["--strict"] == "yes"
+        try options.parse(arguments, allowed: ["--bytes-per-row", "--strict", "--fail-on"])
+        let failOn = try FailOn(options)
         let job = try readInput(options.path)
         guard !job.isEmpty else {
             throw ToolError.message("the job is empty")
@@ -38,11 +45,41 @@ extension PxlTool {
             write("\(finding)", to: FileHandle.standardError)
         }
         let errors = findings.filter { $0.severity == .error }.count
-        let warnings = findings.count - errors
+        let policy = findings.filter { $0.severity != .error && $0.category == .policy }.count
+        let unverified = findings.filter { $0.category == .coverage }.count
         let name = options.path.map { $0 == "-" ? "the job" : $0 } ?? "the job"
         write(
-            "\(name): \(job.count) bytes of \(language), \(errors) error(s), \(warnings) warning(s)",
+            "\(name): \(job.count) bytes of \(language), \(errors) error(s), "
+                + "\(policy) policy warning(s), \(unverified) unverified",
             to: FileHandle.standardOutput)
-        return errors > 0 || (strict && warnings > 0) ? ExitStatus.failure : ExitStatus.ok
+
+        let fatal =
+            switch failOn {
+            case .errors: errors
+            case .policy: errors + policy
+            case .all: errors + policy + unverified
+            }
+        return fatal > 0 ? ExitStatus.failure : ExitStatus.ok
+    }
+
+    /// Which findings the caller wants to be fatal.
+    private enum FailOn: String {
+        case errors, policy, all
+
+        init(_ options: Options) throws {
+            // `--strict yes` predates this flag and meant "fail on anything at all".
+            if options.values["--strict"] == "yes" {
+                self = .all
+                return
+            }
+            guard let name = options.values["--fail-on"] else {
+                self = .errors
+                return
+            }
+            guard let parsed = FailOn(rawValue: name) else {
+                throw ToolError.message("--fail-on takes errors, policy or all, not \(name)")
+            }
+            self = parsed
+        }
     }
 }

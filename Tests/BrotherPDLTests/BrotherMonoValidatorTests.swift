@@ -365,3 +365,43 @@ private func patched(_ job: [UInt8], replacing text: String, with replacement: S
         #expect(findings.first { $0.rule == "line" }?.message.contains("into a row of 621") == true, "\(findings)")
     }
 }
+
+// MARK: - Findings from the owner's review
+
+@Suite struct BrotherMonoValidatorRasterModeTests {
+    @Test func aRAS1200ModeHeaderIsA1200DPIRaster() {
+        // How brlaser asks for 1200 dpi: the mode goes TRUE and RESOLUTION stays at 600. Reading
+        // the resolution alone halves the width, and the row check then calls a correct job
+        // garbled — which is a validator that rejects the very encoder it was written from.
+        #expect(BrotherMonoValidator.bytesPerRow(paper: "LETTER", resolution: "600") == 621)
+        #expect(
+            BrotherMonoValidator.bytesPerRow(paper: "LETTER", resolution: "600", ras1200Mode: "TRUE") == 1242)
+        #expect(
+            BrotherMonoValidator.bytesPerRow(paper: "LETTER", resolution: "600", ras1200Mode: "FALSE") == 621)
+        #expect(BrotherMonoValidator.bytesPerRow(paper: "A4", resolution: "600", ras1200Mode: "TRUE") == 1207)
+    }
+
+    @Test func anUnreadableRasterModeLeavesTheWidthUnchecked() {
+        // A value this driver does not know may mean the raster is scaled some other way. Saying
+        // nothing is right; guessing 600 dpi is how the previous version got it wrong.
+        #expect(BrotherMonoValidator.bytesPerRow(paper: "LETTER", resolution: "600", ras1200Mode: "MAYBE") == nil)
+    }
+
+    @Test func aBrlaserStyle1200DPIJobIsNotReportedAsTheWrongWidth() throws {
+        // The whole header, end to end, through the validator: the rows are 1242 bytes because
+        // the mode says 1200 dpi, and nothing should object to them.
+        let job = patched(
+            try goodJob(width: 9933), replacing: "@PJL SET RAS1200MODE = FALSE\n",
+            with: "@PJL SET RAS1200MODE = TRUE\n")
+        let findings = BrotherMonoValidator.check(job: job)
+        #expect(!rules(findings).contains("raster-width"), "\(findings)")
+        #expect(!rules(findings).contains("line"), "\(findings)")
+    }
+
+    @Test func aRAS1200ModeJobStillHasToBeTheRightWidth() throws {
+        // The control: 600 dpi rows under a header claiming 1200 dpi are still reported.
+        let job = patched(
+            try goodJob(), replacing: "@PJL SET RAS1200MODE = FALSE\n", with: "@PJL SET RAS1200MODE = TRUE\n")
+        #expect(rules(BrotherMonoValidator.check(job: job)).contains("raster-width"))
+    }
+}

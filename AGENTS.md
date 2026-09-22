@@ -78,9 +78,19 @@ repository's own `Package.swift`.
 - **`scripts/e2e-test.sh`** — the real macOS rasteriser and the real filter binary, then the output
   decoded and compared pixel for pixel with the raster that produced it. Also the failure paths: a
   raster that stops mid-page, a page the backend must refuse, a non-blocking stdout.
-- **`pxltool check`** — the preflight: what a printer would reject in a finished job, which pixel
-  comparison cannot see (attribute types, operator nesting, protocol class, PJL spellings, block
-  framing, images falling off the sheet). Runs over every job the e2e test and the visit kit build.
+- **`pxltool check`** — the preflight: what pixel comparison cannot see (attribute types, operator
+  nesting, protocol class, PJL spellings, block framing, images falling off the sheet). It sorts
+  what it finds into three kinds, because they are answerable by different evidence and conflating
+  them was a real bug: **protocol** (the job breaks the language, so a printer may reject it),
+  **policy** (legal, but not what this driver means to emit — an image clipped off the sheet is
+  legal PCL XL and still a bug here), and **coverage** (a check that was not made, which is a
+  claim about the validator rather than the job). It fails on protocol findings by default, and on
+  policy ones too with `--fail-on policy`, which is what the e2e test, the visit kit and the queue
+  test use — those jobs are ours, so our own rules apply to them. A capture from another driver is
+  judged by the language alone.
+
+  Rules asserted as protocol violations need a source in the language, not just a reading of what
+  this driver happens to do. `docs/protocol-notes.md` is where that source is recorded.
 - **`scripts/test-queue.sh`** — cupsd itself: the filter run the way CUPS runs it, the options a
   print dialog sets, and the bytes that reach the backend. `PPD_SOURCE=installed` builds the queue
   from the PPD the installer put in `/Library/Printers`, chosen by the model name cupsd indexed —

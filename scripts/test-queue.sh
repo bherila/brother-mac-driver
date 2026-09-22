@@ -82,12 +82,31 @@ if [[ "$ppd_source" == "installed" ]]; then
         echo "no installed PPD at $installed (run scripts/install.sh first)" >&2
         exit 1
     fi
-    listing="$(lpinfo -m 2>/dev/null || true)"
-    model_uri="$(awk -v name="$(basename "$installed")" 'index($1, name) { print $1; exit }' <<<"$listing")"
-    if [[ -z "$model_uri" ]]; then
-        echo "cupsd does not offer $(basename "$installed"); it may not have indexed it yet" >&2
+    if ! listing="$(lpinfo -m 2>/dev/null)"; then
+        echo "lpinfo -m failed, so which PPD cupsd would offer was never established" >&2
         exit 1
     fi
+    # The model URI is a path, so the file is its last component and nothing else. A substring
+    # test would take Archived-Brother-MFC-9330CDW.ppd.gz for Brother-MFC-9330CDW.ppd.gz, and the
+    # run would then reason about one PPD while the queue used another — silently, because both
+    # are plausible drivers for the same printer. More than one match is the same problem wearing
+    # a different hat, so it is a failure rather than a first-past-the-post.
+    #
+    # Written without `mapfile`: macOS ships bash 3.2, where it does not exist and an empty array
+    # under `set -u` is its own small trap.
+    wanted="$(basename "$installed")"
+    matches="$(awk -v name="$wanted" '{ n = split($1, parts, "/"); if (parts[n] == name) print $1 }' <<<"$listing")"
+    if [[ -z "$matches" ]]; then
+        echo "cupsd does not offer $wanted; it may not have indexed it yet" >&2
+        exit 1
+    fi
+    match_count="$(grep -c . <<<"$matches")"
+    if ((match_count > 1)); then
+        echo "cupsd offers $wanted from $match_count places, so which one a queue would get is ambiguous:" >&2
+        sed 's/^/  /' <<<"$matches" >&2
+        exit 1
+    fi
+    model_uri="$matches"
     echo "using the installed PPD, as cupsd offers it: $model_uri"
     # Unpacked only to read *BRBackend below; the queue uses cupsd's copy, not this one.
     gzip -dc "$installed" >"$work/installed.ppd"
@@ -108,6 +127,26 @@ nc_pid=$!
 
 lpadmin -p "$queue" -E -v "socket://127.0.0.1:$port" "${ppd_option[@]}" -o printer-is-shared=false
 queue_created=1
+
+# Which PPD the queue ended up with, rather than which one we asked for. cupsd copies the chosen
+# model into /etc/cups/ppd/<queue>.ppd, so this is its answer, not ours — and it is the only way
+# to know that the file reasoned about below is the file driving the queue.
+effective_ppd="/etc/cups/ppd/$queue.ppd"
+if [[ -r "$effective_ppd" ]]; then
+    for field in '\*ModelName' '\*BRBackend'; do
+        want_line="$(grep -m1 "^$field:" "$ppd" || true)"
+        got_line="$(grep -m1 "^$field:" "$effective_ppd" || true)"
+        if [[ "$want_line" != "$got_line" ]]; then
+            echo "the queue is not running the PPD under test:" >&2
+            echo "  expected $want_line" >&2
+            echo "  queue has $got_line" >&2
+            exit 1
+        fi
+    done
+    echo "the queue's PPD matches the one under test"
+else
+    echo "note: $effective_ppd is not readable, so the queue's PPD identity was not confirmed"
+fi
 
 "$pxltool" testpdf --out "$work/test.pdf" --pages 2
 
@@ -143,7 +182,7 @@ fi
 # The job came out of the real print system, so this is the closest thing to a printer's verdict
 # that can be had without one: everything a printer would reject, checked on the captured bytes.
 echo "== preflight =="
-"$pxltool" check "$work/capture.pxl"
+"$pxltool" check --fail-on policy "$work/capture.pxl"
 
 if grep -q '^\*BRBackend: "pclxl"' "$ppd"; then
     # Dump to a file first: cutting the pipe short with head would fail the pipeline under pipefail.

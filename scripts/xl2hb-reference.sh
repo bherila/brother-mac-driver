@@ -4,6 +4,7 @@
 #
 # usage: scripts/xl2hb-reference.sh <input.ppm> [output.xl2hb] [-- <filter options>]
 #        scripts/xl2hb-reference.sh --setup      # fetch and install the reference only
+#        scripts/xl2hb-reference.sh --manifest   # print what a run here would actually execute
 #
 # Why this exists: XL2HB has no public specification. Brother ships a filter that turns a PPM
 # into an XL2HB job, so it can answer "what should these pixels encode to" byte for byte, which
@@ -30,11 +31,16 @@ root="${BROTHER_ROOT:-/opt/brother/Printers/$model}"
 cache="${XDG_CACHE_HOME:-$HOME/.cache}/brother-mac-driver"
 filter="$root/lpd/br${model}filter"
 
+# The package checksum is verified on every run, and the tree is replaced from the verified
+# package every time.
+#
+# The earlier version returned early whenever an executable was already at $filter, so any binary
+# that happened to be sitting there was used unchecked — and a run of it was then described as
+# "the pinned reference", which it had not been shown to be. An install is not evidence of its own
+# provenance. Re-extracting costs a fraction of a second and means the binary that runs is the one
+# the checksum covers.
 setup() {
-    if [[ -x "$filter" ]]; then
-        return
-    fi
-    echo "fetching Brother's reference filter ($package)" >&2
+    echo "verifying Brother's reference filter ($package)" >&2
     mkdir -p "$cache"
     if [[ ! -f "$cache/$package" ]]; then
         curl -fsSL -o "$cache/$package.part" "$url"
@@ -53,8 +59,21 @@ setup() {
     trap 'rm -rf "$work"' RETURN
     dpkg-deb -x "$cache/$package" "$work"
     mkdir -p "$(dirname "$root")"
+    rm -rf "$root"
     cp -r "$work/opt/brother/Printers/$model" "$(dirname "$root")/"
     echo "installed the reference under $root" >&2
+}
+
+# What a run actually used, so a later one can be compared with it rather than assumed equal to
+# it. The package checksum says what was downloaded; this says what was executed.
+manifest() {
+    echo "# xl2hb-reference manifest"
+    echo "package        $package"
+    echo "package-sha256 $sha256"
+    echo "filter-sha256  $(sha256sum "$filter" | cut -d" " -f1)"
+    for table in "$root/inf/paperinfij2" "$root/inf/br${model}rc"; do
+        [[ -r "$table" ]] && echo "$(basename "$table")   $(sha256sum "$table" | cut -d" " -f1)"
+    done
 }
 
 run() {
@@ -69,10 +88,19 @@ run() {
     "$filter" -pi "$root/inf/paperinfij2" -rc "$root/inf/br${model}rc" "$@" <"$input" \
         | sed 's/@PJL SET JOBTIME = "[0-9]*"/@PJL SET JOBTIME = "0"/' >"$output"
     echo "$output: $(wc -c <"$output" | tr -d ' ') bytes of XL2HB from $input" >&2
+    # Both ends of the run, so a claim about what these bytes mean can be checked against the
+    # bytes it was made from.
+    echo "  in  $(sha256sum "$input" | cut -d" " -f1)" >&2
+    echo "  out $(sha256sum "$output" | cut -d" " -f1)" >&2
 }
 
 if [[ "${1:-}" == "--setup" ]]; then
     setup
+    exit 0
+fi
+if [[ "${1:-}" == "--manifest" ]]; then
+    setup
+    manifest
     exit 0
 fi
 if [[ $# -lt 1 ]]; then

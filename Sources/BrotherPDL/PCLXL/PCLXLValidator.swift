@@ -194,8 +194,17 @@ private struct Walk {
     private var colorSpace: PCLXLColorSpace?
     /// The side the last duplex page declared, to check that the next one turns over.
     private var lastDuplexSide: Int?
+    /// Attribute ids the schema rejected on the record being visited. Reading one of these back
+    /// for a semantic check means deriving geometry from a number the printer would never have
+    /// read — which is how a `uint32` width of 4294967295 reached the stride arithmetic.
+    private var rejected: Set<UInt8> = []
     /// Where the page's coordinate origin has been moved to, from SetPageOrigin.
     private var pageOrigin = (x: 0.0, y: 0.0)
+    /// Whether the page's coordinate system is still one this validator has followed. An operator
+    /// it does not model may be a scale or a rotation, and there is no way to tell from the tag
+    /// alone. Once one has gone past, bounds arithmetic is arithmetic about a page that no longer
+    /// exists, so the sheet checks stop rather than carry on confidently.
+    private var geometryFollowed = true
     /// What PushGS saved, innermost last.
     private var graphicsState:
         [(cursor: (x: Double, y: Double)?, colorSpace: PCLXLColorSpace?, pageOrigin: (x: Double, y: Double))] = []
@@ -225,6 +234,15 @@ private struct Walk {
                 .warning(
                     "operator", "operator 0x\(String(record.tag, radix: 16)) is not one this driver emits",
                     at: record.offset))
+            if pageOpen && geometryFollowed {
+                geometryFollowed = false
+                findings.append(
+                    .coverage(
+                        "image-off-sheet",
+                        "operator 0x\(String(record.tag, radix: 16)) may move or scale the page, so where the "
+                            + "rest of this page's images land is no longer checked",
+                        at: record.offset))
+            }
             // Where it sits is a separate question from what it is: an operator of any kind after
             // EndSession is outside the session, and saying so does not depend on naming it.
             if sessionEnded {
@@ -235,7 +253,9 @@ private struct Walk {
             }
             return
         }
-        OperatorSpec.all[op]?.check(record, named: String(describing: op), into: &findings)
+        rejected =
+            OperatorSpec.all[op]?
+            .check(record, named: String(describing: op), class: protocolClass, into: &findings) ?? []
         if op != .readImage, record.data != nil {
             findings.append(
                 .error("operator-data", "\(op) carries embedded data, which only ReadImage may", at: record.offset))
@@ -287,7 +307,7 @@ private struct Walk {
             require(!sessionOpen, "session", "BeginSession inside a session")
             sessionOpen = true
             unitsPerMeasure = xy(record, .unitsPerMeasure) ?? (0, 0)
-            measure = (record[.measure]?.intValue).flatMap { UInt8(exactly: $0) }.flatMap(PCLXLMeasure.init) ?? .inch
+            measure = (accepted(record, .measure)?.intValue).flatMap { UInt8(exactly: $0) }.flatMap(PCLXLMeasure.init) ?? .inch
             if unitsPerMeasure.x != unitsPerMeasure.y {
                 findings.append(
                     .warning(
@@ -319,7 +339,7 @@ private struct Walk {
             // Code 13 ("eB5Paper") is a defined class-2.1 spelling of JIS B5, which a printer
             // accepts; this driver sends code 11 for the same sheet, so seeing 13 says the job
             // came from somewhere else rather than that it will be rejected.
-            if record[.mediaSize]?.intValue == 13 {
+            if accepted(record, .mediaSize)?.intValue == 13 {
                 findings.append(
                     .warning(
                         "media-size", "MediaSize 13 is eB5Paper; this driver spells JIS B5 as 11",
@@ -335,9 +355,11 @@ private struct Walk {
             colorSpace = nil
             pageOrigin = (0, 0)
             graphicsState = []
+            geometryFollowed = true
             sheet = sheetSize(record, into: &findings)
             // A landscape page is the same sheet turned on its side, so its bounds are too.
-            let orientation = (record[.orientation]?.intValue).flatMap { UInt8(exactly: $0) }.flatMap(PCLXLOrientation.init)
+            let orientation = (accepted(record, .orientation)?.intValue)
+                .flatMap { UInt8(exactly: $0) }.flatMap(PCLXLOrientation.init)
             if orientation == .landscape || orientation == .reverseLandscape, let portrait = sheet {
                 sheet = (width: portrait.height, height: portrait.width)
             }
@@ -347,9 +369,13 @@ private struct Walk {
             require(pageOpen, "page", "EndPage without BeginPage")
             require(image == nil, "image", "EndPage inside an image")
             if images == 0 {
-                findings.append(.warning("page", "page \(pages) carries no images", at: record.offset))
+                // A page with nothing on it is a blank sheet, which is what the printer should receive when
+                // the rasteriser pads a duplex job to an even page count — and also what it receives when a
+                // page's raster was dropped. Nothing in the job distinguishes the two, so this reports the
+                // fact without calling it a fault.
+                findings.append(.coverage("page", "page \(pages) carries no images", at: record.offset))
             }
-            if let copies = record[.pageCopies]?.intValue, copies != 1 {
+            if let copies = accepted(record, .pageCopies)?.intValue, copies != 1 {
                 findings.append(
                     .warning(
                         "page-copies", "PageCopies is \(copies); this driver sends each copy as its own page",
@@ -368,14 +394,14 @@ private struct Walk {
             require(pageOpen, "page", "SetPageOrigin outside a page")
             require(image == nil, "image", "SetPageOrigin inside an image, where only image data may go")
             // The new origin is given in the current coordinate system, so the shifts accumulate.
-            if let point = xy(record, .point) {
+            if let point = xy(record, .pageOrigin) {
                 pageOrigin = (pageOrigin.x + point.x, pageOrigin.y + point.y)
             }
 
         case .setColorSpace:
             require(pageOpen, "page", "SetColorSpace outside a page")
             require(image == nil, "image", "SetColorSpace inside an image, where only image data may go")
-            colorSpace = (record[.colorSpace]?.intValue).flatMap { UInt8(exactly: $0) }.flatMap(PCLXLColorSpace.init)
+            colorSpace = (accepted(record, .colorSpace)?.intValue).flatMap { UInt8(exactly: $0) }.flatMap(PCLXLColorSpace.init)
 
         case .beginImage:
             require(pageOpen, "page", "BeginImage outside a page")
@@ -416,7 +442,7 @@ private struct Walk {
     private mutating func sheetSize(
         _ record: PCLXLOperatorRecord, into findings: inout [PDLFinding]
     ) -> (width: Double, height: Double)? {
-        let standard = record[.mediaSize]?.intValue
+        let standard = accepted(record, .mediaSize)?.intValue
         let custom = xy(record, .customMediaSize)
         switch (standard, custom) {
         case (nil, nil):
@@ -436,7 +462,7 @@ private struct Walk {
             }
             return (units(points: media.widthPoints, along: .x), units(points: media.heightPoints, along: .y))
         case (nil, .some(let size)):
-            guard let units = record[.customMediaSizeUnits]?.intValue else {
+            guard let units = accepted(record, .customMediaSizeUnits)?.intValue else {
                 findings.append(
                     .error(
                         "custom-media-units", "CustomMediaSize without CustomMediaSizeUnits, so its unit is anyone's guess",
@@ -478,7 +504,7 @@ private struct Walk {
     private mutating func duplexAttributes(_ record: PCLXLOperatorRecord, into findings: inout [PDLFinding]) {
         // Consecutive duplex pages are the two sides of one sheet, so they have to alternate.
         // Repeating a side prints them on separate sheets, and every page on its own is valid.
-        if let side = record[.duplexPageSide]?.intValue {
+        if let side = accepted(record, .duplexPageSide)?.intValue {
             if let last = lastDuplexSide, last == side {
                 findings.append(
                     .warning(
@@ -493,13 +519,13 @@ private struct Walk {
     }
 
     private func duplexModes(_ record: PCLXLOperatorRecord, into findings: inout [PDLFinding]) {
-        let simplex = record[.simplexPageMode] != nil
-        let duplex = record[.duplexPageMode] != nil
+        let simplex = accepted(record, .simplexPageMode) != nil
+        let duplex = accepted(record, .duplexPageMode) != nil
         if simplex && duplex {
             findings.append(
                 .error("duplex", "BeginPage sends both SimplexPageMode and DuplexPageMode", at: record.offset))
         }
-        if record[.duplexPageSide] != nil && !duplex {
+        if accepted(record, .duplexPageSide) != nil && !duplex {
             findings.append(
                 .error("duplex", "BeginPage sends DuplexPageSide without DuplexPageMode", at: record.offset))
         }
@@ -514,7 +540,7 @@ private struct Walk {
     // MARK: Images
 
     private mutating func beginImage(_ record: PCLXLOperatorRecord, into findings: inout [PDLFinding]) {
-        guard let width = record[.sourceWidth]?.intValue, let height = record[.sourceHeight]?.intValue,
+        guard let width = accepted(record, .sourceWidth)?.intValue, let height = accepted(record, .sourceHeight)?.intValue,
             let destination = xy(record, .destinationSize)
         else {
             return  // The attribute rules have already reported what is missing.
@@ -542,45 +568,122 @@ private struct Walk {
                         + "user units; this driver never scales",
                     at: record.offset))
         }
-        if let sheet {
+        // PCL XL clips painting to the active clipping region rather than refusing the job, so an
+        // image reaching past the sheet is not by itself a malformed stream — the printer prints
+        // what falls inside. It is still not something this driver means to emit: every image it
+        // places is a page of raster that should land on the paper, and one that does not is a
+        // margin or origin bug whose visible symptom is a silently cropped page. So this is a
+        // policy finding, which `--fail-on policy` makes fatal for jobs this driver wrote.
+        if let sheet, geometryFollowed {
             let left = pageOrigin.x + cursor.x
             let top = pageOrigin.y + cursor.y
             let right = left + destination.x
             let bottom = top + destination.y
             if left < 0 || top < 0 || right > sheet.width || bottom > sheet.height {
                 findings.append(
-                    .error(
+                    .warning(
                         "image-off-sheet",
                         "image covers \(Self.number(left)),\(Self.number(top))–\(Self.number(right)),\(Self.number(bottom)) "
-                            + "of a \(Self.number(sheet.width))×\(Self.number(sheet.height)) sheet",
+                            + "of a \(Self.number(sheet.width))×\(Self.number(sheet.height)) sheet, so the printer "
+                            + "will clip it",
                         at: record.offset))
             }
         }
-        let depth = record[.colorDepth]?.intValue
-        let bitsPerComponent = depth == Int(PCLXLColorDepth.bits8.rawValue) ? 8 : depth == Int(PCLXLColorDepth.bits4.rawValue) ? 4 : 1
+        let depth = accepted(record, .colorDepth)?.intValue
+        let bitsPerComponent =
+            depth == Int(PCLXLColorDepth.bits8.rawValue)
+            ? 8 : depth == Int(PCLXLColorDepth.bits4.rawValue) ? 4 : 1
         // An indexed image carries one index per pixel whatever the colour space; a direct one
         // carries a component per channel. At 1 or 4 bits a pixel is narrower than a byte, so the
         // row is measured in bits and rounded up once, at the end.
-        let indexed = record[.colorMapping]?.intValue == Int(PCLXLColorMapping.indexedPixel.rawValue)
+        let indexed = accepted(record, .colorMapping)?.intValue == Int(PCLXLColorMapping.indexedPixel.rawValue)
         let components = indexed || colorSpace == .gray ? 1 : 3
         image = Image(width: width, height: height, bitsPerPixel: bitsPerComponent * components)
     }
 
-    /// How many bytes a compressed ReadImage block decodes to, or nil when it does not decode at
-    /// all. DeltaRow is told how many rows to expect, so a block short of that throws rather than
-    /// returning a short count; either way the caller sees too little data.
-    private func decodedLength(
-        _ mode: PCLXLCompressMode, _ data: [UInt8], bytesPerRow: Int, rows: Int
-    ) -> Int? {
-        switch mode {
-        case .rle:
-            return (try? PCLXLRLE.decode(data))?.count
-        case .deltaRow:
-            guard bytesPerRow > 0 else { return nil }
-            return (try? PCLXLDeltaRow.decode(data, bytesPerRow: bytesPerRow, rowCount: rows))?.count
-        case .none, .jpeg:
-            return nil
+    /// What a compressed ReadImage block would decode to, measured rather than produced.
+    ///
+    /// The obvious implementation — decode the block and take `count` — asks the decoders to
+    /// allocate the image in order to ask how big it is, and the attributes that decide that size
+    /// come from the job. `SourceWidth` and `BlockHeight` of 65535 are both in range, and at RGB
+    /// 8-bit they make a 131 KB payload demand a 12 GiB output buffer. A validator that a
+    /// malformed job can make exhaust memory is not a check, it is a second way to fail.
+    ///
+    /// So these walk the encoding and count. Neither allocates anything proportional to the
+    /// output, and both stop as soon as the answer is settled.
+    private enum BlockSize {
+        /// Decodes to exactly this many bytes.
+        case exact(Int)
+        /// Reaches at least this many bytes; counting stopped once that was enough to judge.
+        case atLeast(Int)
+        /// Does not decode: truncated, or a command that runs off the end of a row.
+        case malformed
+    }
+
+    /// Counts RLE output without building it. The format is literal and repeat packets, so the
+    /// output length is a sum of packet lengths; nothing needs to be held.
+    private func rleSize(_ data: [UInt8], upTo limit: Int) -> BlockSize {
+        var index = 0
+        var produced = 0
+        while index < data.count {
+            let control = Int(data[index])
+            index += 1
+            if control < 128 {
+                let length = control + 1
+                guard index + length <= data.count else { return .malformed }
+                index += length
+                produced += length
+            } else if control > 128 {
+                guard index < data.count else { return .malformed }
+                index += 1
+                produced += 257 - control
+            }
+            if produced >= limit { return .atLeast(produced) }
         }
+        return .exact(produced)
+    }
+
+    /// Walks DeltaRow's row structure without keeping a seed row or any output. Each row is a
+    /// two-byte length and then commands that write inside `bytesPerRow`; the rows themselves are
+    /// whatever the seed becomes, so counting them is enough to know the output size.
+    private func deltaRowSize(_ data: [UInt8], bytesPerRow: Int, rows: Int) -> BlockSize {
+        guard bytesPerRow > 0 else { return .malformed }
+        var cursor = 0
+        for _ in 0..<rows {
+            guard cursor + 2 <= data.count else { return .malformed }
+            let length = Int(data[cursor]) | Int(data[cursor + 1]) << 8
+            cursor += 2
+            guard cursor + length <= data.count else { return .malformed }
+
+            let end = cursor + length
+            var index = cursor
+            var position = 0
+            while index < end {
+                let command = Int(data[index])
+                index += 1
+                let replacements = (command >> 5) + 1
+                var offset = command & 31
+                if offset == 31 {
+                    while true {
+                        guard index < end else { return .malformed }
+                        let extra = Int(data[index])
+                        index += 1
+                        offset += extra
+                        if extra != 255 { break }
+                    }
+                }
+                position += offset
+                guard position + replacements <= bytesPerRow, index + replacements <= end else {
+                    return .malformed
+                }
+                index += replacements
+                position += replacements
+            }
+            cursor = end
+        }
+        // The decoder insists the block holds these rows and nothing else.
+        guard cursor == data.count else { return .malformed }
+        return .exact(bytesPerRow * rows)
     }
 
     private mutating func readImage(_ record: PCLXLOperatorRecord, into findings: inout [PDLFinding]) {
@@ -590,9 +693,10 @@ private struct Walk {
         }
         defer { image = state }
 
-        if let mode = (record[.compressMode]?.intValue).flatMap({ UInt8(exactly: $0) }).flatMap(PCLXLCompressMode.init) {
-            // DeltaRow and JPEG arrived with protocol class 2.1; a 2.0 stream may not use them.
-            if (mode == .deltaRow || mode == .jpeg) && (protocolClass.major, protocolClass.minor) < (2, 1) {
+        if let mode = (accepted(record, .compressMode)?.intValue).flatMap({ UInt8(exactly: $0) }).flatMap(PCLXLCompressMode.init) {
+            // DeltaRow is the compression class 2.1 added. JPEG is class 2.0 — pairing the two
+            // here was wrong, and made a legal 2.0 JPEG stream look rejectable.
+            if mode == .deltaRow && (protocolClass.major, protocolClass.minor) < (2, 1) {
                 findings.append(
                     .error(
                         "compress-mode-class",
@@ -600,43 +704,66 @@ private struct Walk {
                             + "\(protocolClass.major).\(protocolClass.minor)",
                         at: record.offset))
             }
-            if let data = record.data, state.bitsPerPixel > 0, let blockHeight = record[.blockHeight]?.intValue,
+            if let data = record.data, state.bitsPerPixel > 0, let blockHeight = accepted(record, .blockHeight)?.intValue,
                 blockHeight > 0
             {
                 // Rows are padded to a multiple of PadBytesMultiple, four by default. RLE carries
                 // the padding through the compressed stream; DeltaRow does not, because its rows
-                // are length-prefixed.
-                let multiple = record[.padBytesMultiple]?.intValue ?? 4
+                // are length-prefixed. (GhostPCL pads the one and not the other, the same way.)
+                let multiple = accepted(record, .padBytesMultiple)?.intValue ?? 4
                 let bytesPerRow = state.bytesPerRow
                 let padded = multiple > 0 ? (bytesPerRow + multiple - 1) / multiple * multiple : bytesPerRow
+                let stride = mode == .deltaRow ? bytesPerRow : padded
+                // Every factor here came out of the job, so the product is checked rather than
+                // assumed: a block the arithmetic cannot describe is one the printer cannot
+                // reconstruct either, and saying so beats trapping on it.
+                let (needed, overflowed) = stride.multipliedReportingOverflow(by: blockHeight)
+                guard !overflowed else {
+                    findings.append(
+                        .error(
+                            "image-data-length",
+                            "\(blockHeight) rows of \(state.width) pixels at \(state.bitsPerPixel) bits is "
+                                + "more image than any printer can hold",
+                            at: record.offset))
+                    return
+                }
                 switch mode {
                 case .none:
                     // Uncompressed data is the rows themselves, so the block's size is exact.
-                    if data.count != padded * blockHeight {
+                    if data.count != needed {
                         findings.append(
                             .error(
                                 "image-data-length",
-                                "uncompressed block carries \(data.count) bytes, not the \(padded * blockHeight) "
+                                "uncompressed block carries \(data.count) bytes, not the \(needed) "
                                     + "that \(blockHeight) rows of \(state.width) pixels at "
                                     + "\(state.bitsPerPixel) bits need",
                                 at: record.offset))
                     }
                 case .rle, .deltaRow:
                     // A compressed block's declared height is only a claim until the block is
-                    // decoded: an empty or truncated one satisfies every count in the stream while
+                    // read: an empty or truncated one satisfies every count in the stream while
                     // leaving the printer nothing to reconstruct the rows from.
-                    let needed = mode == .rle ? padded * blockHeight : bytesPerRow * blockHeight
-                    if let decoded = decodedLength(mode, data, bytesPerRow: bytesPerRow, rows: blockHeight) {
-                        if decoded < needed {
-                            findings.append(
-                                .error(
-                                    "image-data-length",
-                                    "\(mode) block decodes to \(decoded) bytes, not the \(needed) that "
-                                        + "\(blockHeight) rows of \(state.width) pixels at "
-                                        + "\(state.bitsPerPixel) bits need",
-                                    at: record.offset))
-                        }
-                    } else {
+                    let size =
+                        mode == .rle
+                        ? rleSize(data, upTo: needed)
+                        : deltaRowSize(data, bytesPerRow: bytesPerRow, rows: blockHeight)
+                    switch size {
+                    case .atLeast:
+                        // Enough, and possibly more. Excess RLE output is not treated as fatal:
+                        // no interpreter evidence here says a printer rejects a block that
+                        // decodes long, only that one decoding short cannot fill the rows.
+                        break
+                    case .exact(let produced) where produced >= needed:
+                        break
+                    case .exact(let produced):
+                        findings.append(
+                            .error(
+                                "image-data-length",
+                                "\(mode) block holds \(produced) bytes of image, not the \(needed) that "
+                                    + "\(blockHeight) rows of \(state.width) pixels at "
+                                    + "\(state.bitsPerPixel) bits need",
+                                at: record.offset))
+                    case .malformed:
                         findings.append(
                             .error(
                                 "image-data-length",
@@ -645,9 +772,11 @@ private struct Walk {
                                 at: record.offset))
                     }
                 case .jpeg:
-                    // Nothing here decodes JPEG; the operator table has already said the mode is
-                    // one this driver does not emit.
-                    break
+                    // Nothing here reads JPEG. Saying so is a coverage note, not a verdict: the
+                    // mode is legal in class 2.0 and the block may be perfectly well formed.
+                    findings.append(
+                        .coverage(
+                            "image-data-length", "a JPEG block's size is not checked here", at: record.offset))
                 }
             }
         }
@@ -655,7 +784,9 @@ private struct Walk {
             findings.append(.error("image-data", "ReadImage carries no data block", at: record.offset))
         }
 
-        guard let startLine = record[.startLine]?.intValue, let blockHeight = record[.blockHeight]?.intValue else {
+        guard let startLine = accepted(record, .startLine)?.intValue,
+            let blockHeight = accepted(record, .blockHeight)?.intValue
+        else {
             return
         }
         if startLine != state.rowsRead {
@@ -689,12 +820,17 @@ private struct Walk {
         image = nil
     }
 
+    /// An attribute's value, or nil when the schema already rejected it.
+    private func accepted(_ record: PCLXLOperatorRecord, _ attribute: PCLXLAttribute) -> PCLXLValue? {
+        rejected.contains(attribute.rawValue) ? nil : record[attribute]
+    }
+
     /// An xy pair, whichever numeric shape it was sent in, kept as written. Rounding each
     /// component before the bounds arithmetic would move the edges: a cursor at 5098.5 with a
     /// destination 1.5 wide ends exactly on a 5100-unit sheet, where 5099 plus 2 is off it.
     /// A non-finite real is treated as absent, since the attribute rules have already reported it.
     private func xy(_ record: PCLXLOperatorRecord, _ attribute: PCLXLAttribute) -> (x: Double, y: Double)? {
-        switch record[attribute] {
+        switch accepted(record, attribute) {
         case .integers(let values) where values.count == 2:
             return (Double(values[0]), Double(values[1]))
         case .reals(let values) where values.count == 2:
@@ -712,33 +848,69 @@ private struct Walk {
 private struct AttributeSpec {
     var attribute: PCLXLAttribute
     var tags: Set<PCLXLDataTag>
-    /// Legal values, for the scalar attributes whose range is fixed. Nil leaves the value unchecked.
+    /// Legal values in protocol class 2.0, for the scalar attributes whose range is fixed. Nil
+    /// leaves the value unchecked.
     var values: ClosedRange<Int>?
     /// Values inside `values` that are nonetheless not defined, e.g. gaps in an enumeration.
     var excluding: Set<Int> = []
     var required: Bool
+    /// Values class 2.1 adds. A stream that declares 2.0 may not use them; one that declares 2.1
+    /// may, and a validator that ignores the distinction either rejects legal 2.1 jobs or accepts
+    /// values the 2.0 interpreter has never heard of.
+    var addedIn21: Set<Int> = []
+    /// Whether class 2.1 stops requiring the attribute.
+    var optionalIn21: Bool = false
 
     static func required(
         _ attribute: PCLXLAttribute, _ tags: Set<PCLXLDataTag>, _ values: ClosedRange<Int>? = nil,
-        excluding: Set<Int> = []
+        excluding: Set<Int> = [], addedIn21: Set<Int> = [], optionalIn21: Bool = false
     ) -> Self {
-        Self(attribute: attribute, tags: tags, values: values, excluding: excluding, required: true)
+        Self(
+            attribute: attribute, tags: tags, values: values, excluding: excluding, required: true,
+            addedIn21: addedIn21, optionalIn21: optionalIn21)
     }
 
     static func optional(
         _ attribute: PCLXLAttribute, _ tags: Set<PCLXLDataTag>, _ values: ClosedRange<Int>? = nil,
-        excluding: Set<Int> = []
+        excluding: Set<Int> = [], addedIn21: Set<Int> = []
     ) -> Self {
-        Self(attribute: attribute, tags: tags, values: values, excluding: excluding, required: false)
+        Self(
+            attribute: attribute, tags: tags, values: values, excluding: excluding, required: false,
+            addedIn21: addedIn21)
+    }
+
+    /// Whether `value` is one this attribute may carry in a stream of the given class.
+    func allows(_ value: Int, in protocolClass: (major: Int, minor: Int)) -> Bool {
+        if (protocolClass.major, protocolClass.minor) >= (2, 1), addedIn21.contains(value) { return true }
+        guard let values else { return true }
+        return values.contains(value) && !excluding.contains(value)
+    }
+
+    func isRequired(in protocolClass: (major: Int, minor: Int)) -> Bool {
+        required && !(optionalIn21 && (protocolClass.major, protocolClass.minor) >= (2, 1))
     }
 }
 
 /// Data-type groups, named once so the operator table stays readable.
+/// The data types each attribute is sent in.
+///
+/// These are per attribute, not one permissive "any XY" group, because HP's schemas are per
+/// attribute: `DestinationSize` takes `uint16XY` and nothing else, while `CustomMediaSize` also
+/// takes `real32XY`. A shared group that admits every XY shape does not make the validator more
+/// tolerant of real jobs — it makes it accept encodings no printer is documented to read, which
+/// is the opposite of what a preflight is for.
 private enum Tags {
     static let ubyte: Set<PCLXLDataTag> = [.ubyte]
     static let uint16: Set<PCLXLDataTag> = [.ubyte, .uint16]
+    /// `Point` and `PageOrigin`: a signed position, in the three widths HP lists.
+    static let positionXY: Set<PCLXLDataTag> = [.ubyteXY, .uint16XY, .sint16XY]
+    /// `DestinationSize`.
+    static let uint16XY: Set<PCLXLDataTag> = [.uint16XY]
+    /// `CustomMediaSize`, which may be fractional.
+    static let mediaXY: Set<PCLXLDataTag> = [.uint16XY, .real32XY]
+    /// `UnitsPerMeasure`. Not narrowed against the schema the way the four above have been, so it
+    /// stays as it was rather than gaining a restriction nobody has checked.
     static let unsignedXY: Set<PCLXLDataTag> = [.ubyteXY, .uint16XY, .uint32XY, .real32XY]
-    static let anyXY: Set<PCLXLDataTag> = unsignedXY.union([.sint16XY, .sint32XY])
     static let byteArray: Set<PCLXLDataTag> = [.ubyteArray]
 }
 
@@ -754,7 +926,8 @@ private struct OperatorSpec {
         .beginSession: OperatorSpec(attributes: [
             .required(.unitsPerMeasure, Tags.unsignedXY, 1...65535),
             .required(.measure, Tags.ubyte, 0...2),
-            .optional(.errorReport, Tags.ubyte, 0...3),
+            // 0…3 plus NullReporter, BackChannel and ErrorPage variants: 4…6 are class 2.0 too.
+            .optional(.errorReport, Tags.ubyte, 0...6),
         ]),
         .endSession: OperatorSpec(attributes: []),
         .openDataSource: OperatorSpec(attributes: [
@@ -763,11 +936,16 @@ private struct OperatorSpec {
         ]),
         .closeDataSource: OperatorSpec(attributes: []),
         .beginPage: OperatorSpec(attributes: [
-            .required(.orientation, Tags.ubyte, 0...3),
-            .optional(.mediaSize, Tags.ubyte, 0...18),
-            .optional(.customMediaSize, Tags.unsignedXY, 1...65535),
+            // Class 2.1 adds eDefaultOrientation (4) and stops requiring the attribute at all.
+            .required(.orientation, Tags.ubyte, 0...3, addedIn21: [4], optionalIn21: true),
+            // 13 (eB5Paper), 19, 20, 21 and 96 are class 2.1 additions, so a 2.0 stream may not
+            // use them. This driver spells JIS B5 as 11 whatever the class.
+            .optional(.mediaSize, Tags.ubyte, 0...18, excluding: [13], addedIn21: [13, 19, 20, 21, 96]),
+            .optional(.customMediaSize, Tags.mediaXY, 1...65535),
             .optional(.customMediaSizeUnits, Tags.ubyte, 0...2),
-            .optional(.mediaSource, Tags.ubyte, 0...6),
+            // 0…7 are the named sources; 8…255 are the external trays, which a printer with a
+            // finisher really does use.
+            .optional(.mediaSource, Tags.ubyte, 0...255),
             .optional(.mediaType, Tags.byteArray),
             .optional(.simplexPageMode, Tags.ubyte, 0...0),
             .optional(.duplexPageMode, Tags.ubyte, 0...1),
@@ -783,17 +961,17 @@ private struct OperatorSpec {
             .optional(.paletteData, Tags.byteArray),
         ]),
         .setCursor: OperatorSpec(attributes: [
-            .required(.point, Tags.anyXY)
+            .required(.point, Tags.positionXY)
         ]),
         .setPageOrigin: OperatorSpec(attributes: [
-            .required(.point, Tags.anyXY)
+            .required(.pageOrigin, Tags.positionXY)
         ]),
         .beginImage: OperatorSpec(attributes: [
             .required(.colorMapping, Tags.ubyte, 0...1),
             .required(.colorDepth, Tags.ubyte, 0...2),
             .required(.sourceWidth, Tags.uint16, 1...65535),
             .required(.sourceHeight, Tags.uint16, 1...65535),
-            .required(.destinationSize, Tags.unsignedXY, 1...65535),
+            .required(.destinationSize, Tags.uint16XY, 1...65535),
         ]),
         .readImage: OperatorSpec(attributes: [
             .required(.startLine, Tags.uint16, 0...65535),
@@ -811,8 +989,16 @@ private struct OperatorSpec {
     ]
 
     /// Every attribute on the operator is one it may carry, in a shape and range it accepts, once.
-    func check(_ record: PCLXLOperatorRecord, named name: String, into findings: inout [PDLFinding]) {
+    ///
+    /// Returns the ids of the attributes it rejected, so the semantic checks that follow do not
+    /// compute geometry from a value the schema has already said is not one a printer reads.
+    @discardableResult
+    func check(
+        _ record: PCLXLOperatorRecord, named name: String, class protocolClass: (major: Int, minor: Int),
+        into findings: inout [PDLFinding]
+    ) -> Set<UInt8> {
         var seen: Set<UInt8> = []
+        var rejected: Set<UInt8> = []
 
         for attribute in record.attributes {
             guard seen.insert(attribute.id).inserted else {
@@ -823,6 +1009,7 @@ private struct OperatorSpec {
             guard let spec = attributes.first(where: { $0.attribute.rawValue == attribute.id }) else {
                 findings.append(
                     .error("attribute-unknown", "\(name) does not take \(label(attribute))", at: attribute.offset))
+                rejected.insert(attribute.id)
                 continue
             }
             guard spec.tags.contains(attribute.tag) else {
@@ -831,29 +1018,36 @@ private struct OperatorSpec {
                         "attribute-type",
                         "\(label(attribute)) is sent as \(attribute.tag), which \(name) does not accept",
                         at: attribute.offset))
+                rejected.insert(attribute.id)
                 continue
             }
-            guard let range = spec.values else { continue }
+            guard spec.values != nil else { continue }
             for number in numbers(of: attribute.value) {
                 guard let value = number else {
                     findings.append(
                         .error("attribute-value", "\(label(attribute)) is not a number any printer could use", at: attribute.offset))
+                    rejected.insert(attribute.id)
                     break
                 }
-                if !range.contains(value) || spec.excluding.contains(value) {
+                if !spec.allows(value, in: protocolClass) {
                     findings.append(
                         .error(
-                            "attribute-value", "\(label(attribute)) is \(value), outside \(range.lowerBound)…\(range.upperBound)",
+                            "attribute-value",
+                            "\(label(attribute)) is \(value), which protocol class "
+                                + "\(protocolClass.major).\(protocolClass.minor) does not define for it",
                             at: attribute.offset))
+                    rejected.insert(attribute.id)
                     break
                 }
             }
         }
 
-        for spec in attributes where spec.required && !seen.contains(spec.attribute.rawValue) {
+        for spec in attributes
+        where spec.isRequired(in: protocolClass) && !seen.contains(spec.attribute.rawValue) {
             findings.append(
                 .error("attribute-missing", "\(name) is missing \(spec.attribute)", at: record.offset))
         }
+        return rejected
     }
 
     private func label(_ attribute: PCLXLAttributeRecord) -> String {
