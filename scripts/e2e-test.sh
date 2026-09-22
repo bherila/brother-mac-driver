@@ -76,6 +76,17 @@ for entry in "${cases[@]}"; do
         failures=$((failures + 1))
     fi
 
+    # Preflight: what a printer would reject and what this driver should not have emitted, neither
+    # of which any amount of pixel comparison can see. These are our own jobs, so policy findings
+    # are failures here — an image clipped off the sheet is a bug even though PCL XL allows it.
+    if ! "$pxltool" check --fail-on policy "$work/$name.pxl" 2>"$work/$name.check"; then
+        echo "FAIL: preflight rejected the job" >&2
+        cat "$work/$name.check" >&2
+        failures=$((failures + 1))
+    elif [[ -s "$work/$name.check" ]]; then
+        sed 's/^/   /' "$work/$name.check"
+    fi
+
     "$pxltool" compare "$work/$name.ras" "$work/$name.pxl" | tee "$work/$name.compare"
     # A blank page (the rasteriser pads duplex jobs to an even page count) carries no images.
     if grep -v -e ", $expect_format)" -e " $expect_format identical" -e "(0 images)" "$work/$name.compare" | grep -q .; then
@@ -114,6 +125,13 @@ fi
 # grep exits 1 on no match; that must not end the script before the summary.
 echo "   complete images sent before the cut: $(grep -c "EndImage" "$work/truncated.dump" || true)"
 
+# The preflight must reject what the filter had to abandon: a validator that passes everything
+# would have passed every check above too.
+if "$pxltool" check "$work/truncated.pxl" >/dev/null 2>&1; then
+    echo "FAIL: preflight accepted a job that was cut short" >&2
+    failures=$((failures + 1))
+fi
+
 # A page the backend refuses (here: a second page at 300 dpi), after the first page has already
 # gone out. The filter must fail, but only after closing the job: the printer must not be left
 # inside an open session waiting for data that will never come.
@@ -142,6 +160,13 @@ if [[ "$(grep -c "EndPage" "$work/badpage.dump")" != 1 ]]; then
     failures=$((failures + 1))
 fi
 echo "   $(grep -m1 "ERROR" "$work/badpage.filter.log" || echo "(the filter logged no ERROR line)")"
+# The point of closing the job on the way out is that what did go to the printer is still a
+# complete, well-formed job, so the preflight has to accept it.
+if ! "$pxltool" check --fail-on policy "$work/badpage.pxl" >/dev/null 2>"$work/badpage.check"; then
+    echo "FAIL: the job left behind by an unprintable page is not well-formed" >&2
+    cat "$work/badpage.check" >&2
+    failures=$((failures + 1))
+fi
 
 # stdout that is non-blocking with a slow reader (not what CUPS normally gives a filter, but
 # nothing forbids it): the job must arrive intact, and the filter must wait for room rather than

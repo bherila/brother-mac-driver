@@ -51,6 +51,16 @@ public struct PCLXLWriter: Sendable {
         attr(attribute)
     }
 
+    /// A real32 xy pair. This driver writes device pixels, which are whole numbers, so nothing in
+    /// it emits one — but the readers and the validator accept the shape, and a test that checks
+    /// they do needs a way to produce it.
+    public mutating func real32XY(_ x: Float, _ y: Float, _ attribute: PCLXLAttribute) {
+        bytes.append(PCLXLDataTag.real32XY.rawValue)
+        le32(Int(x.bitPattern))
+        le32(Int(y.bitPattern))
+        attr(attribute)
+    }
+
     public mutating func uint32XY(_ x: Int, _ y: Int, _ attribute: PCLXLAttribute) {
         bytes.append(PCLXLDataTag.uint32XY.rawValue)
         le32(x)

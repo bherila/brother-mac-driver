@@ -48,16 +48,108 @@ and can switch all of them off together.
 
 ## XL2HB (not implemented)
 
-- Stream header is `) BROTHER XL2HB;…` — the shape of a PCL XL stream header with a different
-  name, so the body is probably a PCL XL-style tagged binary stream.
-- The host does colour conversion and halftoning. The Linux filter ships per-plane dither tables
-  for C, M, Y and K, in normal and toner-save variants, for a 600 dpi mode and a "CAPT"
-  (2400-dpi-class) mode, plus colour-matching tables named `Match Monitor`, `Vivid` and `None`.
-- Media type is carried inside the stream, not in PJL: `dRegular`, `dThin`, `dThick`, `dThick2`,
-  `dBond`, `dRecycled`, `dEnvelopes`, `dEnvthin`, `dEnvthick`, `dPostcard`, `dLabel`, `dGlossy`,
-  `dTransparency`.
-- The Linux filter is a self-contained i386 executable (libc and libm only) that reads a PPM
-  stream and writes the job, which makes it usable as a byte-exact reference under emulation.
+Everything below was read out of Brother's own Linux filter for the HL-3140CW, by running it and
+decoding what it produced. `scripts/xl2hb-reference.sh` reproduces any of it: it fetches the
+driver package (checksum-pinned, nothing of Brother's is kept in this repository), runs a PPM
+through the filter and blanks the `JOBTIME` line, which is the only part of the output that is not
+a function of the input. Two runs of the same page are then byte-identical, so the filter answers
+"what should these pixels encode to" exactly. It is a 32-bit x86 binary needing only libc and
+libm, so it runs on a Linux x86 host with the 32-bit loader installed, or under `qemu-i386-static`.
+
+**The body is PCL XL's tag encoding.** Not merely "PCL XL-shaped": the same data tags, the same
+`0xF8` attribute prefix, the same attribute numbers and the same operator codes. `PCLXLReader`
+parses a Brother XL2HB job end to end with no changes, and `pxltool dump` disassembles one. The
+stream header is `) BROTHER XL2HB;1;0` — protocol class 1.0, where this driver's PCL XL is 2.0.
+
+A single-page job from the filter decodes to:
+
+```
+BeginSession    Measure=inch UnitsPerMeasure=[600, 600]
+OpenDataSource  SourceType=default DataOrg=binaryLowByteFirst
+BeginPage       Orientation=0 MediaSource=1 MediaSize=0 MediaType="dRegular" SimplexPageMode=0
+SetPageOrigin   attr42=[100, 100]
+BeginImage      ColorMapping=0 ColorDepth=0 SourceWidth=4928 SourceHeight=6400
+                DestinationSize=[4928, 6400] CommentData=[…] PageCopies=0
+ReadImage       StartLine=… BlockHeight=… CompressMode=1 CommentData=<plane> data=…
+…
+EndImage / EndPage / CloseDataSource / EndSession
+```
+
+- `ColorDepth=0` is 1 bit per pixel, so the planes arrive already halftoned — the host does the
+  colour conversion and the screening, which is what the per-plane dither tables in the package
+  are for (C, M, Y, K, in normal and toner-save variants, for a 600 dpi and a "CAPT" 2400-dpi-class
+  mode, plus colour-matching tables named `Match Monitor`, `Vivid` and `None`).
+### What was run
+
+Seven synthetic pages, 600 × 400 px, through the pinned filter. Every figure below comes from
+these; `scripts/xl2hb-reference.sh --manifest` prints the identity of what it executes, and the
+runs were byte-identical when repeated against a freshly extracted copy of the package.
+
+| | |
+|---|---|
+| package | `hl3140cwlpr-1.1.2-1.i386.deb`, sha256 `601f392b…` |
+| filter binary | sha256 `51157a28…` |
+| `paperinfij2` | sha256 `71fd58ef…` |
+| `brhl3140cwrc` | sha256 `90803f6e…` |
+
+### Observed
+
+`CommentData` on `ReadImage` carries a small integer that tracks which colourant the block
+contains. Each page below is a flat colour, and each row gives the blocks in the order sent, as
+(plane, `StartLine`, `BlockHeight`):
+
+| Page | Blocks | Planes present |
+|---|---|---|
+| white | (0, 48, 2249) (0, 2297, 2249) (0, 4546, 1854) | 0 |
+| black | (0, 0, 2249) (0, 2249, 2249) (0, 4498, 1902) | 0 |
+| cyan | (1, 0, 49) (0, 48, 2249) (0, 2297, 2249) (0, 4546, 1854) | 1, 0 |
+| magenta | as cyan, with plane 2 | 2, 0 |
+| yellow | as cyan, with plane 3 | 3, 0 |
+| red | (3, 0, 44) (2, 0, 49) (3, 44, 5) (0, 48, 2249) … | 3, 2, 0 |
+
+Three things follow directly, and two of them correct what this file said before:
+
+- **Plane 0 is sent on every page, including a blank one.** A pure white page still carries three
+  plane-0 blocks. So "planes with no ink are not sent" is true of planes 1–3 and false of plane 0.
+- **`CommentData` on `BeginImage` is the same array on all seven pages**, flat white to red:
+  `[0, 3, 1, 1, 5, 0, 4, 1034, 1, 5, 1, 4, 532, 1, 5, 2, 4, 532, 1, 5, 3, 4, 1034]`. It therefore
+  does not describe which planes follow, which is what this file previously guessed. Its shape is
+  four per-plane entries whose last field is 1034, 532, 532, 1034 for planes 0, 1, 2, 3 — matching
+  the plane order, but what the numbers are is not established.
+- **Blocks of different planes interleave, and each plane keeps its own `StartLine`.** Red sends
+  plane 3, then plane 2, then plane 3 again continuing from line 44. Row accounting is per plane,
+  not per image.
+
+`StartLine` also skips leading rows with nothing on them: black starts at 0 and every other page
+at 48, so per-plane row totals differ between pages (6400 for black, 6352 for the rest).
+
+### Interpreted
+
+**0 = K, 1 = C, 2 = M, 3 = Y** is an inference from these pages, not something the format states:
+a cyan page adds plane 1, magenta plane 2, yellow plane 3, and red — which is magenta plus yellow —
+adds exactly 2 and 3. It is consistent across every page tried and it matches the order of the
+per-plane entries in `BeginImage`'s `CommentData`, but it rests on one model's filter and on flat
+synthetic colours. A page mixing colourants in known proportions, decoded back to pixels, would
+settle it properly.
+
+- `SetPageOrigin` carries **attribute 42, which is `PageOrigin`** — the operator's own operand in
+  HP's schema, not a Brother extension. It is [100, 100]: 100 units at 600 per inch is the 12 pt
+  unprintable margin documented below. (Reading this as `Point`, attribute 76, is a mistake this
+  repository made in `PCLXLValidator` until the owner's review caught it.)
+- `MediaType` travels inside the stream as a `ubyteArray` string, not in PJL: `dRegular`, `dThin`,
+  `dThick`, `dThick2`, `dBond`, `dRecycled`, `dEnvelopes`, `dEnvthin`, `dEnvthick`, `dPostcard`,
+  `dLabel`, `dGlossy`, `dTransparency`.
+- `CompressMode=1` is RLE, the same compression this driver already encodes and decodes for PCL XL.
+
+**What this means for implementing it:** the framing, the tag writer, the RLE encoder and the
+reader are all already in `BrotherPDL` and appear to apply unchanged. What is genuinely new is the
+colour path — RGB to CMYK, then halftoning against Brother's dither tables — and the meaning of
+`BeginImage`'s `CommentData`.
+
+**Not established:** what the 1034/532 figures are; how `StartLine` is chosen; whether the plane
+order is required or incidental; and whether any of it is what the firmware wants. Agreeing with
+Brother's encoder is much better evidence than agreeing with our own decoder, and it is still not
+a printer accepting a page.
 
 ## PCL XL, as emitted by this driver
 
@@ -76,6 +168,26 @@ Details that are easy to get wrong:
 
 **Unconfirmed on hardware:** which protocol class Brother's emulation accepts, whether custom
 media sizes are honoured, MediaSource codes for the trays, and duplex back-side orientation.
+
+The rules above are encoded in `PCLXLValidator`, which `pxltool check` runs over a finished job:
+attribute data types and ranges per operator, session/page/image nesting, protocol class against
+the compression used, image row accounting, and whether the images fit the sheet.
+`BrotherMonoValidator` does the same for the mono format's PJL, PCL envelope and block framing.
+
+What it reports is of three kinds, and they are not interchangeable:
+
+- **protocol** — the job breaks the language, so a printer may answer
+  `PCL XL error … Operator: … Position: …` and print nothing.
+- **policy** — legal, and not what this driver means to emit. An image reaching past the sheet is
+  the clearest case: PCL XL clips painting to the clipping region rather than refusing the job, so
+  the printer prints the part that fits. It is still a bug here, because every image this driver
+  places should land on the paper.
+- **coverage** — a check that was not made, because the job used something the validator does not
+  model. A claim about the validator, not about the job.
+
+`pxltool check` fails on the first by default, on the first two with `--fail-on policy` (what CI
+uses for jobs this driver wrote), and on all three with `--fail-on all`. Reporting all three as
+"the printer will reject this" was this file's earlier claim and was too broad.
 
 ## Brother's host-based mono format (HL-2140 family)
 

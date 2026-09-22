@@ -3,8 +3,12 @@
 # localhost instead of real (USB) hardware, so the queue/filter/capture path can be
 # exercised without a printer attached.
 #
-# usage: [MODEL=<name>] scripts/test-queue.sh [-o key=value ...]
+# usage: [MODEL=<name>] [PPD_SOURCE=generated|installed] scripts/test-queue.sh [-o key=value ...]
 #   MODEL picks the PPD (default MFC-9330CDW; e.g. MODEL=HL-2140-series).
+#   PPD_SOURCE=installed builds the queue from the PPD the installer put in
+#     /Library/Printers/PPDs, chosen by the model name cupsd indexed — the way System Settings
+#     does it — so what is tested is the file a user actually gets. The default, `generated`,
+#     uses a freshly generated PPD, which is what a developer wants before installing anything.
 #   Extra arguments are passed straight through to `lp`, so specific PPD options
 #   (e.g. -o BRCompression=DeltaRow) can be exercised.
 set -euo pipefail
@@ -14,6 +18,8 @@ build_dir="${BUILD_DIR:-$repo_root/.build/release}"
 pxltool="$build_dir/pxltool"
 queue="BrotherOSS_Test"
 port=9100
+ppd_source="${PPD_SOURCE:-generated}"
+installed_ppd_dir="/Library/Printers/PPDs/Contents/Resources"
 filter_path="/Library/Printers/BrotherOSS/filter/rastertobrother"
 timeout_seconds=120
 
@@ -68,14 +74,79 @@ if [[ ! -f "$ppd" ]]; then
     exit 1
 fi
 
+# How the queue gets its PPD. Naming the installed file by hand would bypass cupsd's own index,
+# which is what a print dialog picks from, so the installed case asks cupsd for it by model name.
+if [[ "$ppd_source" == "installed" ]]; then
+    installed="$installed_ppd_dir/$(basename "$ppd").gz"
+    if [[ ! -f "$installed" ]]; then
+        echo "no installed PPD at $installed (run scripts/install.sh first)" >&2
+        exit 1
+    fi
+    if ! listing="$(lpinfo -m 2>/dev/null)"; then
+        echo "lpinfo -m failed, so which PPD cupsd would offer was never established" >&2
+        exit 1
+    fi
+    # The model URI is a path, so the file is its last component and nothing else. A substring
+    # test would take Archived-Brother-MFC-9330CDW.ppd.gz for Brother-MFC-9330CDW.ppd.gz, and the
+    # run would then reason about one PPD while the queue used another — silently, because both
+    # are plausible drivers for the same printer. More than one match is the same problem wearing
+    # a different hat, so it is a failure rather than a first-past-the-post.
+    #
+    # Written without `mapfile`: macOS ships bash 3.2, where it does not exist and an empty array
+    # under `set -u` is its own small trap.
+    wanted="$(basename "$installed")"
+    matches="$(awk -v name="$wanted" '{ n = split($1, parts, "/"); if (parts[n] == name) print $1 }' <<<"$listing")"
+    if [[ -z "$matches" ]]; then
+        echo "cupsd does not offer $wanted; it may not have indexed it yet" >&2
+        exit 1
+    fi
+    match_count="$(grep -c . <<<"$matches")"
+    if ((match_count > 1)); then
+        echo "cupsd offers $wanted from $match_count places, so which one a queue would get is ambiguous:" >&2
+        while IFS= read -r uri; do echo "  $uri" >&2; done <<<"$matches"
+        exit 1
+    fi
+    model_uri="$matches"
+    echo "using the installed PPD, as cupsd offers it: $model_uri"
+    # Unpacked only to read *BRBackend below; the queue uses cupsd's copy, not this one.
+    gzip -dc "$installed" >"$work/installed.ppd"
+    ppd="$work/installed.ppd"
+    ppd_option=(-m "$model_uri")
+elif [[ "$ppd_source" == "generated" ]]; then
+    ppd_option=(-P "$ppd")
+else
+    echo "PPD_SOURCE must be 'generated' or 'installed', not '$ppd_source'" >&2
+    exit 1
+fi
+
 # The listener goes up before the queue exists, so nothing can be sent to the port before it is
 # ready. nc serves one connection and exits; if that happens before our job is done, something
 # else took the connection and the job would only sit in retry until the timeout.
 nc -l 127.0.0.1 "$port" >"$work/capture.pxl" &
 nc_pid=$!
 
-lpadmin -p "$queue" -E -v "socket://127.0.0.1:$port" -P "$ppd" -o printer-is-shared=false
+lpadmin -p "$queue" -E -v "socket://127.0.0.1:$port" "${ppd_option[@]}" -o printer-is-shared=false
 queue_created=1
+
+# Which PPD the queue ended up with, rather than which one we asked for. cupsd copies the chosen
+# model into /etc/cups/ppd/<queue>.ppd, so this is its answer, not ours — and it is the only way
+# to know that the file reasoned about below is the file driving the queue.
+effective_ppd="/etc/cups/ppd/$queue.ppd"
+if [[ -r "$effective_ppd" ]]; then
+    for field in '\*ModelName' '\*BRBackend'; do
+        want_line="$(grep -m1 "^$field:" "$ppd" || true)"
+        got_line="$(grep -m1 "^$field:" "$effective_ppd" || true)"
+        if [[ "$want_line" != "$got_line" ]]; then
+            echo "the queue is not running the PPD under test:" >&2
+            echo "  expected $want_line" >&2
+            echo "  queue has $got_line" >&2
+            exit 1
+        fi
+    done
+    echo "the queue's PPD matches the one under test"
+else
+    echo "note: $effective_ppd is not readable, so the queue's PPD identity was not confirmed"
+fi
 
 "$pxltool" testpdf --out "$work/test.pdf" --pages 2
 
@@ -100,11 +171,23 @@ kill "$nc_pid" 2>/dev/null || true
 wait "$nc_pid" 2>/dev/null || true
 nc_pid=""
 
+captured_bytes="$(wc -c <"$work/capture.pxl" | tr -d ' ')"
 echo
-echo "capture: $(wc -c <"$work/capture.pxl" | tr -d ' ') bytes"
+echo "capture: $captured_bytes bytes"
+if ((captured_bytes == 0)); then
+    echo "the print system sent nothing to the listener" >&2
+    exit 1
+fi
+
+# The job came out of the real print system, so this is the closest thing to a printer's verdict
+# that can be had without one: everything a printer would reject, checked on the captured bytes.
+echo "== preflight =="
+"$pxltool" check --fail-on policy "$work/capture.pxl"
+
 if grep -q '^\*BRBackend: "pclxl"' "$ppd"; then
     # Dump to a file first: cutting the pipe short with head would fail the pipeline under pipefail.
     "$pxltool" dump "$work/capture.pxl" >"$work/capture.dump"
+    pages="$(grep -c '^page ' "$work/capture.dump" || true)"
     echo "== job dump (first 40 lines) =="
     head -40 "$work/capture.dump"
 
@@ -112,8 +195,19 @@ if grep -q '^\*BRBackend: "pclxl"' "$ppd"; then
     "$pxltool" render "$work/capture.pxl" --out "$render_dir"
     echo "rendered pages: $render_dir"
 else
+    # shellcheck disable=SC2126  # counting occurrences, not matching lines: grep -c would undercount
+    pages="$(LC_ALL=C grep -o -a '1030M' "$work/capture.pxl" | wc -l | tr -d ' ')"
     # The mono format is only checkable against its raster (pxltool compare); show its text preamble.
     echo "== job preamble =="
     head -c 700 "$work/capture.pxl" | LC_ALL=C tr -d '\000' | LC_ALL=C tr -c '[:print:]\n' '.'
     echo
 fi
+
+# The test PDF has two pages. Two is already even, so duplex padding adds nothing, and anything
+# other than two means the print system lost or multiplied a page. (A run that asks for printer
+# copies would legitimately send more; this script does not.)
+if [[ "$pages" -ne 2 ]]; then
+    echo "the captured job has $pages page(s); the job sent had 2" >&2
+    exit 1
+fi
+echo "queue test passed: $pages page(s) through $queue"

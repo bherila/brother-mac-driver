@@ -12,8 +12,38 @@ public enum BrotherMonoReader {
     static let rasterStart = Array("\u{1B}*b1030m".utf8)
 
     /// True when `job` looks like this format rather than PCL XL.
+    ///
+    /// Decided by what follows the PJL header, not by searching the whole job: a PCL XL stream
+    /// header is a line starting with `)` immediately after the PJL, whereas this format continues
+    /// in PCL. Searching everywhere would take a job whose name happened to contain `) HP-PCL XL`
+    /// — a title is the user's to choose — for a PCL XL job, and hand a valid mono capture to the
+    /// wrong reader.
     public static func recognizes(_ job: [UInt8]) -> Bool {
-        job.firstRange(of: rasterStart) != nil && job.firstRange(of: Array(") HP-PCL XL".utf8)) == nil
+        job.firstRange(of: rasterStart) != nil && !startsAPCLXLStream(job)
+    }
+
+    /// Whether the bytes after any leading PJL block open a PCL XL stream header.
+    private static func startsAPCLXLStream(_ job: [UInt8]) -> Bool {
+        var offset = 0
+        // Leading NULs are this format's resynchronisation padding; PCL XL has none, but skipping
+        // them costs nothing and keeps the two paths reading the same way.
+        while offset < job.count, job[offset] == 0 { offset += 1 }
+        if job[offset...].starts(with: PCLXLReader.uel) {
+            offset += PCLXLReader.uel.count
+        }
+        // Then any number of @PJL lines, the last of which enters a language.
+        while job[offset...].starts(with: Array("@PJL".utf8)) {
+            guard let newline = job[offset...].firstIndex(of: 0x0A) else { return false }
+            offset = newline + 1
+        }
+        // The same set `PCLXLReader` skips before the binding, so the two cannot disagree about
+        // whether a stream header follows.
+        while offset < job.count, isPCLXLWhitespace(job[offset]) { offset += 1 }
+        return offset < job.count && job[offset] == UInt8(ascii: ")")
+    }
+
+    private static func isPCLXLWhitespace(_ byte: UInt8) -> Bool {
+        byte == 0x00 || byte == 0x20 || (byte >= 0x09 && byte <= 0x0D)
     }
 
     /// Everything before the first page's raster data: the PJL and PCL setup, as text.

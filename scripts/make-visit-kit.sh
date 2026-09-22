@@ -51,13 +51,26 @@ for entry in "${jobs[@]}"; do
         cupsfilter -p "$ppd" -m application/vnd.cups-raster ${cups_options[@]+"${cups_options[@]}"} \
             "$work/$source.pdf" >"$work/$name.ras" 2>"$log" &&
             PPD="$ppd" "$filter" 1 kit "${name%.*}" 1 "$job_options" "$work/$name.ras" >"$kit/jobs/$name" 2>>"$log" &&
-            "$pxltool" compare "$work/$name.ras" "$kit/jobs/$name" >/dev/null 2>>"$log"
+            "$pxltool" compare "$work/$name.ras" "$kit/jobs/$name" >/dev/null 2>>"$log" &&
+            "$pxltool" check --fail-on policy "$kit/jobs/$name" >/dev/null 2>"$work/$name.check"
     }; then
         echo "failed to build or verify $name:" >&2
         tail -20 "$log" >&2
+        [[ -s "$work/$name.check" ]] && cat "$work/$name.check" >&2
         exit 1
     fi
-    printf '  %-34s %8s bytes  verified\n' "$name" "$(wc -c <"$kit/jobs/$name" | tr -d ' ')"
+    # `--fail-on policy` has already stopped the build for anything the driver should not have
+    # produced. What can still be reported here is a check the validator could not make — a blank
+    # page it cannot tell from a dropped one, say. That does not stop the kit being built, but it
+    # is never swallowed, because "preflight clean" has to mean it.
+    size="$(wc -c <"$kit/jobs/$name" | tr -d ' ')"
+    warnings="$(grep -c . "$work/$name.check" || true)"
+    if ((warnings > 0)); then
+        printf '  %-34s %8s bytes  verified, %s preflight note(s)\n' "$name" "$size" "$warnings"
+        sed 's/^/        /' "$work/$name.check"
+    else
+        printf '  %-34s %8s bytes  verified, preflight clean\n' "$name" "$size"
+    fi
 done
 
 cp "$work/colour.pdf" "$kit/calibration-colour.pdf"

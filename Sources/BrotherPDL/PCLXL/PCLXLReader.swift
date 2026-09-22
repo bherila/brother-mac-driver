@@ -17,18 +17,41 @@ public enum PCLXLValue: Equatable, Sendable {
     }
 }
 
+/// One attribute of an operator: the value, the data tag it was written with, and where it started.
+///
+/// The tag is kept because the value alone cannot tell a `ubyte` from a `uint16`, and a printer
+/// rejects an attribute sent with a data type it does not accept for that attribute.
+public struct PCLXLAttributeRecord: Equatable, Sendable {
+    public var id: UInt8
+    public var value: PCLXLValue
+    /// The data tag that introduced the value.
+    public var tag: PCLXLDataTag
+    /// Byte offset of the data tag from the start of the input.
+    public var offset: Int
+
+    public init(id: UInt8, value: PCLXLValue, tag: PCLXLDataTag, offset: Int) {
+        self.id = id
+        self.value = value
+        self.tag = tag
+        self.offset = offset
+    }
+
+    /// The named attribute, or nil for an id this project does not name.
+    public var attribute: PCLXLAttribute? { PCLXLAttribute(rawValue: id) }
+}
+
 /// One operator with the attribute list that preceded it and any embedded data that followed it.
 public struct PCLXLOperatorRecord: Equatable, Sendable {
     /// Raw operator tag. Use `PCLXLOperator(rawValue:)` for the ones this project names.
     public var tag: UInt8
-    /// Attribute id → value, in stream order.
-    public var attributes: [(id: UInt8, value: PCLXLValue)]
+    /// The attributes that preceded the operator, in stream order.
+    public var attributes: [PCLXLAttributeRecord]
     /// Embedded data (`0xFA` / `0xFB` block) that followed the operator, if any.
     public var data: [UInt8]?
     /// Byte offset of the operator tag from the start of the input.
     public var offset: Int
 
-    public init(tag: UInt8, attributes: [(id: UInt8, value: PCLXLValue)], data: [UInt8]?, offset: Int) {
+    public init(tag: UInt8, attributes: [PCLXLAttributeRecord], data: [UInt8]?, offset: Int) {
         self.tag = tag
         self.attributes = attributes
         self.data = data
@@ -39,10 +62,17 @@ public struct PCLXLOperatorRecord: Equatable, Sendable {
         attributes.first { $0.id == attribute.rawValue }?.value
     }
 
+    /// Two records are equal when they carry the same attribute ids and values; the data tags and
+    /// attribute offsets are reporting detail, not part of the record's identity.
     public static func == (lhs: Self, rhs: Self) -> Bool {
         lhs.tag == rhs.tag && lhs.data == rhs.data && lhs.offset == rhs.offset
             && lhs.attributes.count == rhs.attributes.count
             && zip(lhs.attributes, rhs.attributes).allSatisfy { $0.id == $1.id && $0.value == $1.value }
+    }
+
+    /// The record for a named attribute, with its data tag and offset.
+    public func record(_ attribute: PCLXLAttribute) -> PCLXLAttributeRecord? {
+        attributes.first { $0.id == attribute.rawValue }
     }
 }
 
@@ -74,21 +104,33 @@ public enum PCLXLReader {
         let pjlHeader = try scanner.readPJLBlock()
         let streamHeader = try scanner.readStreamHeaderLine()
         var operators: [PCLXLOperatorRecord] = []
-        var pending: [(id: UInt8, value: PCLXLValue)] = []
+        var pending: [PCLXLAttributeRecord] = []
 
         while true {
             scanner.skipWhiteSpace()
-            guard let tag = scanner.peek() else { break }
+            guard let tag = scanner.peek() else {
+                guard pending.isEmpty else {
+                    throw PCLXLError.malformed("\(pending.count) attribute(s) at the end of the stream have no operator")
+                }
+                break
+            }
             if tag == 0x1B {
                 guard scanner.matches(uel) else { throw PCLXLError.unexpectedTag(tag, offset: scanner.offset) }
+                guard pending.isEmpty else {
+                    throw PCLXLError.malformed(
+                        "\(pending.count) attribute(s) before the closing UEL at offset \(scanner.offset) have no operator")
+                }
                 scanner.advance(by: uel.count)
                 break
             }
             switch tag {
             case 0xC0...0xE5:
-                let value = try scanner.readValue()
+                let valueOffset = scanner.offset
+                let (dataTag, value) = try scanner.readValue()
                 scanner.skipWhiteSpace()
-                pending.append((id: try scanner.readAttributeID(), value: value))
+                pending.append(
+                    PCLXLAttributeRecord(
+                        id: try scanner.readAttributeID(), value: value, tag: dataTag, offset: valueOffset))
             case 0x41...0xBF:
                 let offset = scanner.offset
                 scanner.advance(by: 1)
@@ -102,6 +144,12 @@ public enum PCLXLReader {
         }
 
         let pjlTrailer = try scanner.readTrailingPJL()
+        // The trailer stops at the first thing that is neither PJL nor a UEL. Returning anyway
+        // would hide whatever follows — a second job concatenated on, or a corrupted tail — which
+        // the printer still reads even though nothing here described it.
+        guard scanner.isAtEnd else {
+            throw PCLXLError.malformed("\(scanner.remaining) byte(s) after the end of the job at offset \(scanner.offset)")
+        }
         return PCLXLStream(
             pjlHeader: pjlHeader, streamHeader: streamHeader, operators: operators, pjlTrailer: pjlTrailer)
     }
@@ -158,6 +206,8 @@ private struct Scanner {
     }
 
     var isAtEnd: Bool { offset >= bytes.count }
+
+    var remaining: Int { max(0, bytes.count - offset) }
 
     func peek(_ ahead: Int = 0) -> UInt8? {
         let index = offset + ahead
@@ -287,7 +337,7 @@ private struct Scanner {
         }
     }
 
-    mutating func readValue() throws -> PCLXLValue {
+    mutating func readValue() throws -> (tag: PCLXLDataTag, value: PCLXLValue) {
         let tagOffset = offset
         let raw = try takeByte()
         guard let tag = PCLXLDataTag(rawValue: raw) else {
@@ -296,14 +346,14 @@ private struct Scanner {
         let kind = tag.elementKind
         switch tag.elementShape {
         case .scalar:
-            return kind.isReal ? .real(try readFloat()) : .integer(try readInt(kind))
+            return (tag, kind.isReal ? .real(try readFloat()) : .integer(try readInt(kind)))
         case .xy:
-            return try readSequence(kind, count: 2, asBytes: false)
+            return (tag, try readSequence(kind, count: 2, asBytes: false))
         case .box:
-            return try readSequence(kind, count: 4, asBytes: false)
+            return (tag, try readSequence(kind, count: 4, asBytes: false))
         case .array:
             let count = try readArrayLength()
-            return try readSequence(kind, count: count, asBytes: kind == .ubyte)
+            return (tag, try readSequence(kind, count: count, asBytes: kind == .ubyte))
         }
     }
 
