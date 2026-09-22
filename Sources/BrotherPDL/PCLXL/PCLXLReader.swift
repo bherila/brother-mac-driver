@@ -144,6 +144,12 @@ public enum PCLXLReader {
         }
 
         let pjlTrailer = try scanner.readTrailingPJL()
+        // The trailer stops at the first thing that is neither PJL nor a UEL. Returning anyway
+        // would hide whatever follows — a second job concatenated on, or a corrupted tail — which
+        // the printer still reads even though nothing here described it.
+        guard scanner.isAtEnd else {
+            throw PCLXLError.malformed("\(scanner.remaining) byte(s) after the end of the job at offset \(scanner.offset)")
+        }
         return PCLXLStream(
             pjlHeader: pjlHeader, streamHeader: streamHeader, operators: operators, pjlTrailer: pjlTrailer)
     }
@@ -200,6 +206,8 @@ private struct Scanner {
     }
 
     var isAtEnd: Bool { offset >= bytes.count }
+
+    var remaining: Int { max(0, bytes.count - offset) }
 
     func peek(_ ahead: Int = 0) -> UInt8? {
         let index = offset + ahead

@@ -20,6 +20,24 @@ public enum BrotherMonoValidator {
         scan.job()
         return scan.findings
     }
+
+    /// How wide a row must be for the paper and resolution a page header states, or nil when
+    /// either is unreadable.
+    ///
+    /// This family prints to the top-left of its printable area with brlaser's margins — 8 pt at
+    /// the left and right — so the paper name fixes the row width exactly. A header that disagrees
+    /// with the rows it introduces produces a garbled page, and nothing else here would notice,
+    /// because the raster is internally consistent either way.
+    public static func bytesPerRow(paper: String?, resolution: String?) -> Int? {
+        guard let paper, let resolution, let dpi = Int(resolution), dpi > 0,
+            let size = MediaSize.all.first(where: { BrotherMonoBackend.pjlPaper($0) == paper })
+        else {
+            return nil
+        }
+        let printablePoints = size.widthPoints - 2 * 8
+        let pixels = Int((printablePoints * Double(dpi) / 72).rounded())
+        return (pixels + 7) / 8
+    }
 }
 
 // MARK: - The scan
@@ -35,6 +53,10 @@ private struct Scan {
 
     private var offset = 0
     private var pages = 0
+    /// Bytes per row implied by the page header's PAPER and RESOLUTION, when both are readable.
+    private var headerBytesPerRow: Int?
+    /// Whether this page has already been reported as disagreeing with its header.
+    private var reportedWidthMismatch = false
     private var jobName: String?
     private var sawEOJ = false
     /// Whether a page header has been seen; the first page may not start without one.
@@ -138,6 +160,7 @@ private struct Scan {
     /// `@PJL SET …` lines, then `ENTER LANGUAGE = PCL`, then the PCL reset and copy count.
     private mutating func pageHeader(_ lines: [String]) {
         var seen: Set<String> = []
+        var settings: [String: String] = [:]
         var entered = 0
         for line in lines {
             if line == "@PJL" { continue }
@@ -159,6 +182,7 @@ private struct Scan {
                 continue
             }
             let (variable, value) = (parts[0], parts[2])
+            settings[variable] = value
             if !seen.insert(variable).inserted {
                 error("pjl-line", "the page header sets \(variable) twice")
             }
@@ -184,7 +208,10 @@ private struct Scan {
         }
         pclReset()
         configured = true
+        headerBytesPerRow = BrotherMonoValidator.bytesPerRow(
+            paper: settings["PAPER"], resolution: settings["RESOLUTION"])
     }
+
 
     /// `ESC E` (reset), `ESC &l1X` (one copy) and, on a duplex model, `ESC &l2S`.
     private mutating func pclReset() {
@@ -214,6 +241,7 @@ private struct Scan {
         // A job may change paper size between pages, so a width inferred from an earlier page says
         // nothing about this one. A width the caller stated covers the whole job and stands.
         bytesPerRow = statedBytesPerRow
+        reportedWidthMismatch = false
 
         var lines = 0
         while offset < bytes.count {
@@ -308,6 +336,17 @@ private struct Scan {
         }
         if let width = bytesPerRow, !line.blank, line.end > width {
             error("line", "line writes \(line.end) bytes into a row of \(width)", at: start)
+        }
+
+        // The page header states the paper and the resolution, which between them fix how wide a
+        // row has to be. Rows of another width print as a garbled page, and nothing else here —
+        // nor any comparison against the raster — would notice, because both sides agree.
+        if let width = bytesPerRow, let expected = headerBytesPerRow, width != expected, !reportedWidthMismatch {
+            reportedWidthMismatch = true
+            error(
+                "raster-width",
+                "rows are \(width) bytes where the page header's paper and resolution imply \(expected)",
+                at: start)
         }
 
         // Whole means: every byte of the row is written, so nothing is inherited from the line before.

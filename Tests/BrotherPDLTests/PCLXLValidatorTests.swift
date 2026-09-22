@@ -307,6 +307,7 @@ private func handBuiltJob(
     padBytesMultiple: Int? = nil, imageWidth: Int = 6, imageHeight: Int = 2,
     colorDepth: PCLXLColorDepth = .bits8, orientation: PCLXLOrientation = .portrait,
     cursor: (x: Int, y: Int) = (x: 0, y: 0), pageOrigin: (x: Int, y: Int)? = nil,
+    realCursor: (x: Float, y: Float)? = nil, realDestination: (x: Float, y: Float)? = nil,
     dataBytes: Int? = nil, beforeImage: ((inout PCLXLWriter) -> Void)? = nil,
     insideImage: ((inout PCLXLWriter) -> Void)? = nil
 ) -> [UInt8] {
@@ -332,13 +333,21 @@ private func handBuiltJob(
     beforeImage?(&writer)
     writer.enumeration(PCLXLColorSpace.gray, .colorSpace)
     writer.op(.setColorSpace)
-    writer.uint16XY(cursor.x, cursor.y, .point)
+    if let realCursor {
+        writer.real32XY(realCursor.x, realCursor.y, .point)
+    } else {
+        writer.uint16XY(cursor.x, cursor.y, .point)
+    }
     writer.op(.setCursor)
     writer.enumeration(PCLXLColorMapping.directPixel, .colorMapping)
     writer.enumeration(colorDepth, .colorDepth)
     writer.uint16(imageWidth, .sourceWidth)
     writer.uint16(imageHeight, .sourceHeight)
-    writer.uint16XY(imageWidth, imageHeight, .destinationSize)
+    if let realDestination {
+        writer.real32XY(realDestination.x, realDestination.y, .destinationSize)
+    } else {
+        writer.uint16XY(imageWidth, imageHeight, .destinationSize)
+    }
     writer.op(.beginImage)
     insideImage?(&writer)
 
@@ -591,5 +600,38 @@ extension UInt32 {
         job = patched(job, replacing: "@PJL JOB NAME=\"third review\"", with: "@PJL JOB NAME=third review   ")
         job = patched(job, replacing: "@PJL EOJ NAME=\"third review\"", with: "@PJL EOJ NAME=other job      ")
         #expect(rules(PCLXLValidator.check(job: job)).contains("pjl-eoj"))
+    }
+}
+
+// MARK: - Findings from the fourth external review of this file
+
+@Suite struct PCLXLValidatorFourthReviewTests {
+    @Test func bytesAfterTheEndOfTheJobAreReported() throws {
+        // A second job concatenated onto the first, or a corrupted tail: the printer reads it
+        // either way, and the job still ends in a UEL, so the framing check alone is content.
+        let job = try goodJob() + Array("rubbish".utf8) + PCLXLReader.uel
+        #expect(rules(PCLXLValidator.check(job: job)).contains("parse"))
+    }
+
+    @Test func aUELWithNoPJLAfterItIsReported() throws {
+        // The UEL puts the printer into PJL and nothing takes it back out, so what follows is
+        // read as PJL commands rather than as a PCL XL stream.
+        // Everything between the opening UEL and the stream header goes, leaving the UEL alone.
+        var job = try goodJob()
+        let streamHeader = try #require(job.firstRange(of: Array(") HP-PCL XL".utf8)))
+        job.replaceSubrange(PCLXLReader.uel.count..<streamHeader.lowerBound, with: [])
+        #expect(rules(PCLXLValidator.check(job: job)).contains("pjl-enter-language"))
+    }
+
+    @Test func aFractionalCoordinateIsNotRoundedIntoTheMargin() {
+        // Rounding the cursor and the destination apart moves the edge: 5098.5 + 1.5 lands exactly
+        // on a 5100-unit Letter sheet, where 5099 + 2 would be reported off it.
+        let job = handBuiltJob(imageWidth: 2, realCursor: (x: 5098.5, y: 10.5), realDestination: (x: 1.5, y: 2.5))
+        let findings = PCLXLValidator.check(job: job)
+        #expect(!rules(findings).contains("image-off-sheet"), "\(findings)")
+
+        // Half a unit further and it genuinely does not fit.
+        let over = handBuiltJob(imageWidth: 2, realCursor: (x: 5099.0, y: 10.5), realDestination: (x: 1.5, y: 2.5))
+        #expect(rules(PCLXLValidator.check(job: over)).contains("image-off-sheet"))
     }
 }

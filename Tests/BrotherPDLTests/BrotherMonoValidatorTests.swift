@@ -8,8 +8,12 @@ import Testing
 // MARK: - Helpers
 
 /// A job from the real encoder: `pages` pages with a black bar down the left of each.
+///
+/// The default page is US Letter as the macOS rasteriser delivers it to this backend — 4967
+/// pixels across, which is 612 pt less brlaser's 8 pt side margins at 600 dpi. The width has to
+/// match the paper the page header names, because the validator now checks exactly that.
 private func goodJob(
-    pages: Int = 1, width: Int = 512, height: Int = 200, options: JobOptions = JobOptions(),
+    pages: Int = 1, width: Int = 4967, height: Int = 200, options: JobOptions = JobOptions(),
     abandonLastPage: Bool = false
 ) throws -> [UInt8] {
     var sink = ByteBuffer()
@@ -75,9 +79,9 @@ private func patched(_ job: [UInt8], replacing text: String, with replacement: S
     }
 
     @Test func theRowWidthIsCheckedWhenTheCallerKnowsIt() throws {
-        // 512 pixels is 64 bytes per row; nothing in the job itself states that.
-        #expect(BrotherMonoValidator.check(job: try goodJob(), bytesPerRow: 64).isEmpty)
-        #expect(BrotherMonoValidator.check(job: try goodJob(), bytesPerRow: 32).hasErrors)
+        // 4967 pixels is 621 bytes per row; the raster states that, the job does not.
+        #expect(BrotherMonoValidator.check(job: try goodJob(), bytesPerRow: 621).isEmpty)
+        #expect(BrotherMonoValidator.check(job: try goodJob(), bytesPerRow: 300).hasErrors)
     }
 
     @Test func aPageTallerThanOneBlockPasses() throws {
@@ -219,9 +223,11 @@ private func patched(_ job: [UInt8], replacing text: String, with replacement: S
         // read, not from the first page in the job. A wider second page is not an error.
         var sink = ByteBuffer()
         var backend = BrotherMonoBackend(options: JobOptions())
+        // Letter and A4 as this backend receives them: 612 and 595 pt less 16 pt of side margin,
+        // at 600 dpi.
         let sizes = [
-            (width: 512, sheet: PageGeometry.Size(width: 612, height: 792)),
-            (width: 1024, sheet: PageGeometry.Size(width: 595, height: 842)),
+            (width: 4967, sheet: PageGeometry.Size(width: 612, height: 792)),
+            (width: 4825, sheet: PageGeometry.Size(width: 595, height: 842)),
         ]
         try backend.beginJob(to: &sink)
         for size in sizes {
@@ -260,5 +266,37 @@ private func patched(_ job: [UInt8], replacing text: String, with replacement: S
         let job = patched(
             try goodJob(), replacing: "\u{1B}&l1X", with: "\u{1B}&l\(String(repeating: "9", count: 40))X")
         #expect(rules(BrotherMonoValidator.check(job: job)).contains("pcl-copies"))
+    }
+}
+
+@Suite struct BrotherMonoValidatorFourthReviewTests {
+    @Test func rowsThatDisagreeWithTheDeclaredPaperAreReported() throws {
+        // The header says A4 and the rows are Letter-wide. Both halves are internally consistent,
+        // so neither the block framing nor a comparison against the raster would notice — the page
+        // simply comes out garbled.
+        let job = patched(try goodJob(), replacing: "@PJL SET PAPER = LETTER\n", with: "@PJL SET PAPER = A4\n")
+        let findings = BrotherMonoValidator.check(job: job)
+        #expect(rules(findings).contains("raster-width"))
+        #expect(findings.first { $0.rule == "raster-width" }?.message.contains("604") == true)
+    }
+
+    @Test func theWidthImpliedByEachPaperIsTheOneTheRasteriserProduces() {
+        // Letter and A4 at 600 dpi, less brlaser's 8 pt side margins: the widths the end-to-end
+        // test observes coming out of the macOS rasteriser.
+        #expect(BrotherMonoValidator.bytesPerRow(paper: "LETTER", resolution: "600") == 621)
+        #expect(BrotherMonoValidator.bytesPerRow(paper: "A4", resolution: "600") == 604)
+        #expect(BrotherMonoValidator.bytesPerRow(paper: "LETTER", resolution: "300") == 311)
+        // An unreadable pair says nothing rather than guessing.
+        #expect(BrotherMonoValidator.bytesPerRow(paper: "NOSUCHPAPER", resolution: "600") == nil)
+        #expect(BrotherMonoValidator.bytesPerRow(paper: "LETTER", resolution: nil) == nil)
+    }
+
+    @Test func aJobNamedAfterPCLXLIsStillReadAsMono() throws {
+        // A job title is the user's to choose, and it travels in the PJL header.
+        var options = JobOptions()
+        options.jobName = ") HP-PCL XL is not what this is"
+        let job = try goodJob(options: options)
+        #expect(BrotherMonoReader.recognizes(job))
+        #expect(BrotherMonoValidator.check(job: job).isEmpty)
     }
 }

@@ -28,6 +28,12 @@ public enum PCLXLValidator {
             findings.append(.error("parse", "the job does not parse as PCL XL: \(error)", at: offset))
             return findings
         }
+        if bytes.starts(with: PCLXLReader.uel), stream.pjlHeader.isEmpty {
+            // The opening UEL puts the printer into PJL. With no @PJL line after it, nothing ever
+            // takes it back out, so the stream that follows is read as PJL rather than as PCL XL.
+            findings.append(
+                .error("pjl-enter-language", "the job opens with a UEL and no PJL, so nothing enters PCL XL", at: 0))
+        }
         findings += check(stream)
         return findings.sorted { ($0.offset ?? 0, $0.rule) < ($1.offset ?? 0, $1.rule) }
     }
@@ -179,17 +185,18 @@ private struct Walk {
     private var images = 0
 
     /// Session units, from BeginSession: how many user units make one `measure`.
-    private var unitsPerMeasure = (x: 0, y: 0)
+    private var unitsPerMeasure = (x: 0.0, y: 0.0)
     /// The unit `unitsPerMeasure` counts, also from BeginSession.
     private var measure = PCLXLMeasure.inch
     /// The sheet in user units, when BeginPage said which sheet it is.
-    private var sheet: (width: Int, height: Int)?
-    private var cursor: (x: Int, y: Int)?
+    private var sheet: (width: Double, height: Double)?
+    private var cursor: (x: Double, y: Double)?
     private var colorSpace: PCLXLColorSpace?
     /// Where the page's coordinate origin has been moved to, from SetPageOrigin.
-    private var pageOrigin = (x: 0, y: 0)
+    private var pageOrigin = (x: 0.0, y: 0.0)
     /// What PushGS saved, innermost last.
-    private var graphicsState: [(cursor: (x: Int, y: Int)?, colorSpace: PCLXLColorSpace?, pageOrigin: (x: Int, y: Int))] = []
+    private var graphicsState:
+        [(cursor: (x: Double, y: Double)?, colorSpace: PCLXLColorSpace?, pageOrigin: (x: Double, y: Double))] = []
 
     /// What the open image declared, and how much of it has arrived.
     private struct Image {
@@ -275,7 +282,8 @@ private struct Walk {
                 findings.append(
                     .warning(
                         "units-per-measure",
-                        "UnitsPerMeasure is \(unitsPerMeasure.x)×\(unitsPerMeasure.y); this driver sends square units",
+                        "UnitsPerMeasure is \(Self.number(unitsPerMeasure.x))×\(Self.number(unitsPerMeasure.y)); "
+                            + "this driver sends square units",
                         at: record.offset))
             }
 
@@ -388,7 +396,7 @@ private struct Walk {
     /// The sheet in user units, from MediaSize or CustomMediaSize, reporting what is missing.
     private mutating func sheetSize(
         _ record: PCLXLOperatorRecord, into findings: inout [PDLFinding]
-    ) -> (width: Int, height: Int)? {
+    ) -> (width: Double, height: Double)? {
         let standard = record[.mediaSize]?.intValue
         let custom = xy(record, .customMediaSize)
         switch (standard, custom) {
@@ -420,17 +428,17 @@ private struct Walk {
             // CustomMediaSize has its own unit, which is not necessarily the session's Measure.
             let perInch = Self.measuresPerInch(sizeUnits)
             return (
-                self.units(points: Double(size.x) * 72 / perInch, along: .x),
-                self.units(points: Double(size.y) * 72 / perInch, along: .y)
+                self.units(points: size.x * 72 / perInch, along: .x),
+                self.units(points: size.y * 72 / perInch, along: .y)
             )
         }
     }
 
     /// Points into the session's user units. `UnitsPerMeasure` counts units per `Measure`, so a
     /// session measured in millimetres has ~25.4 times as many measures to an inch as one in inches.
-    private func units(points: Double, along axis: Axis) -> Int {
+    private func units(points: Double, along axis: Axis) -> Double {
         let perMeasure = axis == .x ? unitsPerMeasure.x : unitsPerMeasure.y
-        return Int((points / 72 * Self.measuresPerInch(measure) * Double(perMeasure)).rounded())
+        return points / 72 * Self.measuresPerInch(measure) * perMeasure
     }
 
     static func measuresPerInch(_ measure: PCLXLMeasure) -> Double {
@@ -442,6 +450,11 @@ private struct Walk {
     }
 
     private enum Axis { case x, y }
+
+    /// Whole numbers without a decimal tail, which is what these nearly always are.
+    static func number(_ value: Double) -> String {
+        value == value.rounded() && value.magnitude < 1e15 ? String(Int(value)) : String(value)
+    }
 
     private func duplexAttributes(_ record: PCLXLOperatorRecord, into findings: inout [PDLFinding]) {
         let simplex = record[.simplexPageMode] != nil
@@ -483,11 +496,14 @@ private struct Walk {
                     "color-space", "BeginImage with no SetColorSpace on this page: the page's colour space is undefined",
                     at: record.offset))
         }
-        if destination.x != width || destination.y != height {
+        // Source size is in pixels and destination in user units, so they are only comparable
+        // because this driver never scales — which is exactly what is being checked.
+        if destination.x != Double(width) || destination.y != Double(height) {
             findings.append(
                 .warning(
                     "image-scale",
-                    "image is \(width)×\(height) into \(destination.x)×\(destination.y) user units; this driver never scales",
+                    "image is \(width)×\(height) into \(Self.number(destination.x))×\(Self.number(destination.y)) "
+                        + "user units; this driver never scales",
                     at: record.offset))
         }
         if let sheet {
@@ -499,7 +515,8 @@ private struct Walk {
                 findings.append(
                     .error(
                         "image-off-sheet",
-                        "image covers \(left),\(top)–\(right),\(bottom) of a \(sheet.width)×\(sheet.height) sheet",
+                        "image covers \(Self.number(left)),\(Self.number(top))–\(Self.number(right)),\(Self.number(bottom)) "
+                            + "of a \(Self.number(sheet.width))×\(Self.number(sheet.height)) sheet",
                         at: record.offset))
             }
         }
@@ -585,15 +602,17 @@ private struct Walk {
         image = nil
     }
 
-    /// An xy pair, whichever numeric shape it was sent in. A real is rounded; one no `Int` can hold
-    /// is treated as absent, because the attribute rules have already reported it.
-    private func xy(_ record: PCLXLOperatorRecord, _ attribute: PCLXLAttribute) -> (x: Int, y: Int)? {
+    /// An xy pair, whichever numeric shape it was sent in, kept as written. Rounding each
+    /// component before the bounds arithmetic would move the edges: a cursor at 5098.5 with a
+    /// destination 1.5 wide ends exactly on a 5100-unit sheet, where 5099 plus 2 is off it.
+    /// A non-finite real is treated as absent, since the attribute rules have already reported it.
+    private func xy(_ record: PCLXLOperatorRecord, _ attribute: PCLXLAttribute) -> (x: Double, y: Double)? {
         switch record[attribute] {
         case .integers(let values) where values.count == 2:
-            return (values[0], values[1])
+            return (Double(values[0]), Double(values[1]))
         case .reals(let values) where values.count == 2:
-            guard let x = Int(exactly: values[0].rounded()), let y = Int(exactly: values[1].rounded()) else { return nil }
-            return (x, y)
+            guard values[0].isFinite, values[1].isFinite else { return nil }
+            return (Double(values[0]), Double(values[1]))
         default:
             return nil
         }
