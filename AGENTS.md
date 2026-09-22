@@ -113,8 +113,12 @@ Pull requests get an automatic security review, and a general code review on req
 - Comment **`@codex review`** on the pull request to ask for the code review. It has to be asked
   for each time; it does not run by itself.
 - The security review runs automatically. It frequently fails with a **quota error** — that is
-  expected, and it does not affect the code review, which still runs. Do not treat a security
-  review quota error as a problem with the change.
+  expected, and it does not usually affect the code review. Do not treat a security review quota
+  error as a problem with the change.
+- The code review has a separate limit and can run out too, answering `@codex review` with "you
+  have reached your Codex usage limits for code reviews" instead of findings. A review that cannot
+  run is not a clean review: say so rather than reading the silence as approval, and leave the
+  request standing until someone tops the account up.
 
 Address review findings or say why not. The encoders in `Sources/BrotherPDL/PCLXL/` and
 `Sources/BrotherPDL/Mono/` were merged before an external reviewer was connected to this
