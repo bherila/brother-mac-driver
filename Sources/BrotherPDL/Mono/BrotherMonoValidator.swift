@@ -27,6 +27,9 @@ public enum BrotherMonoValidator {
 /// A cursor over the job that reports what it does not recognise instead of stopping.
 private struct Scan {
     let bytes: [UInt8]
+    /// The width the caller stated, which holds for the whole job.
+    let statedBytesPerRow: Int?
+    /// The width in force, the caller's or the one inferred from the page being read.
     var bytesPerRow: Int?
     var findings: [PDLFinding] = []
 
@@ -44,6 +47,7 @@ private struct Scan {
 
     init(bytes: [UInt8], bytesPerRow: Int?) {
         self.bytes = bytes
+        self.statedBytesPerRow = bytesPerRow
         self.bytesPerRow = bytesPerRow
     }
 
@@ -134,9 +138,11 @@ private struct Scan {
     /// `@PJL SET …` lines, then `ENTER LANGUAGE = PCL`, then the PCL reset and copy count.
     private mutating func pageHeader(_ lines: [String]) {
         var seen: Set<String> = []
+        var entered = 0
         for line in lines {
             if line == "@PJL" { continue }
             if line.hasPrefix("@PJL ENTER LANGUAGE") {
+                entered += 1
                 if line != "@PJL ENTER LANGUAGE = PCL" {
                     error("pjl-enter-language", "the page header enters \(quoted(line)), not @PJL ENTER LANGUAGE = PCL")
                 }
@@ -168,6 +174,10 @@ private struct Scan {
         }
         if lines.last != "@PJL ENTER LANGUAGE = PCL" {
             error("pjl-enter-language", "the page header does not end with @PJL ENTER LANGUAGE = PCL")
+        }
+        // The first one already left PJL, so anything after it is read as PCL, not as a PJL line.
+        if entered > 1 {
+            error("pjl-enter-language", "the page header enters a language \(entered) times")
         }
         for required in ["RESOLUTION", "PAPER", "SOURCETRAY", "ECONOMODE"] where !seen.contains(required) {
             error("pjl-variable", "the page header does not set \(required)")
@@ -201,6 +211,9 @@ private struct Scan {
             error("page", "the first page starts without a page header", at: start)
         }
         pages += 1
+        // A job may change paper size between pages, so a width inferred from an earlier page says
+        // nothing about this one. A width the caller stated covers the whole job and stands.
+        bytesPerRow = statedBytesPerRow
 
         var lines = 0
         while offset < bytes.count {

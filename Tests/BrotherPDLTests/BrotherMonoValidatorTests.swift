@@ -202,3 +202,42 @@ private func patched(_ job: [UInt8], replacing text: String, with replacement: S
         #expect(BrotherMonoValidator.check(job: []).hasErrors)
     }
 }
+
+// MARK: - Findings from the first external review of this file
+
+@Suite struct BrotherMonoValidatorReviewTests {
+    @Test func enteringTheLanguageTwiceIsReported() throws {
+        // The first ENTER LANGUAGE leaves PJL, so the printer reads the second one as PCL.
+        let job = patched(
+            try goodJob(), replacing: "@PJL ENTER LANGUAGE = PCL\n",
+            with: "@PJL ENTER LANGUAGE = PCL\n@PJL ENTER LANGUAGE = PCL\n")
+        #expect(rules(BrotherMonoValidator.check(job: job)).contains("pjl-enter-language"))
+    }
+
+    @Test func pagesMayDifferInWidth() throws {
+        // Nothing in the job states the row width, so it is inferred — but from the page being
+        // read, not from the first page in the job. A wider second page is not an error.
+        var sink = ByteBuffer()
+        var backend = BrotherMonoBackend(options: JobOptions())
+        let sizes = [
+            (width: 512, sheet: PageGeometry.Size(width: 612, height: 792)),
+            (width: 1024, sheet: PageGeometry.Size(width: 595, height: 842)),
+        ]
+        try backend.beginJob(to: &sink)
+        for size in sizes {
+            let geometry = PageGeometry(
+                width: size.width, height: 80, dpi: 600, format: .black1, mediaPoints: size.sheet)
+            var row = [UInt8](repeating: 0, count: geometry.bytesPerRow)
+            for index in 0..<8 { row[index] = 0xFF }
+            try backend.beginPage(geometry, to: &sink)
+            for _ in 0..<geometry.height {
+                try row.withUnsafeBytes { try backend.writeRow($0, to: &sink) }
+            }
+            try backend.endPage(to: &sink)
+        }
+        try backend.endJob(to: &sink)
+
+        let findings = BrotherMonoValidator.check(job: sink.bytes)
+        #expect(findings.isEmpty, "\(findings)")
+    }
+}

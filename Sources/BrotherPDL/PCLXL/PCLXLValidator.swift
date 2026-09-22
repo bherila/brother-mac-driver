@@ -85,6 +85,7 @@ public enum PCLXLValidator {
                 findings.append(.warning("pjl-line", "PJL line is \(line.count) characters, over PJL's 80: \(quoted(line))"))
             }
         }
+        findings += endOfJob(stream)
         if let last = stream.pjlHeader.last {
             // Brother's own drivers write this line without spaces; other vendors' PJL has them.
             let normalized = String(last.filter { $0 != " " })
@@ -98,6 +99,28 @@ public enum PCLXLValidator {
         return findings
     }
 
+    /// A job that opened with a name must close with an EOJ carrying it, or the printer's log and
+    /// its accounting never see the job end.
+    private static func endOfJob(_ stream: PCLXLStream) -> [PDLFinding] {
+        guard let job = stream.pjlHeader.first(where: { $0.hasPrefix("@PJL JOB") }) else { return [] }
+        let name = quotedName(of: job, keyword: "@PJL JOB NAME=")
+        guard let eoj = stream.pjlTrailer.first(where: { $0.hasPrefix("@PJL EOJ") }) else {
+            return [.error("pjl-eoj", "the job opens with \(quoted(job)) and never closes with an @PJL EOJ")]
+        }
+        let closing = quotedName(of: eoj, keyword: "@PJL EOJ NAME=")
+        guard closing == name else {
+            return [.error("pjl-eoj", "@PJL EOJ names \(quoted(closing ?? "")) where @PJL JOB named \(quoted(name ?? ""))")]
+        }
+        return []
+    }
+
+    private static func quotedName(of line: String, keyword: String) -> String? {
+        guard line.hasPrefix(keyword) else { return nil }
+        let rest = line.dropFirst(keyword.count)
+        guard rest.count >= 2, rest.hasPrefix("\""), rest.hasSuffix("\"") else { return nil }
+        return String(rest.dropFirst().dropLast())
+    }
+
     /// Reads `) HP-PCL XL;<major>;<minor>;<comment>`; defaults to 2.0 when it cannot be read.
     private static func protocolClass(_ header: String, into findings: inout [PDLFinding]) -> (major: Int, minor: Int) {
         let fields = header.split(separator: ";", omittingEmptySubsequences: false)
@@ -105,7 +128,9 @@ public enum PCLXLValidator {
             findings.append(.error("stream-header", "unreadable stream header \(quoted(header))"))
             return (2, 0)
         }
-        if major != 2 || minor > 1 {
+        // 2.0 and 2.1 are the classes this driver emits; anything else, negative minors included,
+        // is a stream it did not write.
+        if (major, minor) != (2, 0) && (major, minor) != (2, 1) {
             findings.append(
                 .warning("stream-header", "protocol class \(major).\(minor) is not one this driver has support for"))
         }
@@ -140,6 +165,8 @@ private struct Walk {
 
     /// Session units, from BeginSession: how many user units make one `measure`.
     private var unitsPerMeasure = (x: 0, y: 0)
+    /// The unit `unitsPerMeasure` counts, also from BeginSession.
+    private var measure = PCLXLMeasure.inch
     /// The sheet in user units, when BeginPage said which sheet it is.
     private var sheet: (width: Int, height: Int)?
     private var cursor: (x: Int, y: Int)?
@@ -213,6 +240,7 @@ private struct Walk {
             require(!sessionOpen, "session", "BeginSession inside a session")
             sessionOpen = true
             unitsPerMeasure = xy(record, .unitsPerMeasure) ?? (0, 0)
+            measure = (record[.measure]?.intValue).flatMap { UInt8(exactly: $0) }.flatMap(PCLXLMeasure.init) ?? .inch
             if unitsPerMeasure.x != unitsPerMeasure.y {
                 findings.append(
                     .warning(
@@ -267,15 +295,18 @@ private struct Walk {
 
         case .setCursor:
             require(pageOpen, "page", "SetCursor outside a page")
+            require(image == nil, "image", "SetCursor inside an image, where only image data may go")
             if let point = xy(record, .point) {
                 cursor = point
             }
 
         case .setPageOrigin:
             require(pageOpen, "page", "SetPageOrigin outside a page")
+            require(image == nil, "image", "SetPageOrigin inside an image, where only image data may go")
 
         case .setColorSpace:
             require(pageOpen, "page", "SetColorSpace outside a page")
+            require(image == nil, "image", "SetColorSpace inside an image, where only image data may go")
             colorSpace = (record[.colorSpace]?.intValue).flatMap { UInt8(exactly: $0) }.flatMap(PCLXLColorSpace.init)
 
         case .beginImage:
@@ -290,7 +321,10 @@ private struct Walk {
         case .endImage:
             endImage(record, into: &findings)
 
-        case .comment, .pushGS, .popGS:
+        case .pushGS, .popGS:
+            require(image == nil, "image", "\(op) inside an image, where only image data may go")
+
+        case .comment:
             break
         }
     }
@@ -328,13 +362,9 @@ private struct Walk {
                         at: record.offset))
                 return nil
             }
-            guard let measure = UInt8(exactly: units).flatMap(PCLXLMeasure.init) else { return nil }
-            let perInch: Double =
-                switch measure {
-                case .inch: 1
-                case .millimeter: 25.4
-                case .tenthsOfAMillimeter: 254
-                }
+            guard let sizeUnits = UInt8(exactly: units).flatMap(PCLXLMeasure.init) else { return nil }
+            // CustomMediaSize has its own unit, which is not necessarily the session's Measure.
+            let perInch = Self.measuresPerInch(sizeUnits)
             return (
                 self.units(points: Double(size.x) * 72 / perInch, along: .x),
                 self.units(points: Double(size.y) * 72 / perInch, along: .y)
@@ -342,9 +372,19 @@ private struct Walk {
         }
     }
 
+    /// Points into the session's user units. `UnitsPerMeasure` counts units per `Measure`, so a
+    /// session measured in millimetres has ~25.4 times as many measures to an inch as one in inches.
     private func units(points: Double, along axis: Axis) -> Int {
         let perMeasure = axis == .x ? unitsPerMeasure.x : unitsPerMeasure.y
-        return Int((points * Double(perMeasure) / 72).rounded())
+        return Int((points / 72 * Self.measuresPerInch(measure) * Double(perMeasure)).rounded())
+    }
+
+    static func measuresPerInch(_ measure: PCLXLMeasure) -> Double {
+        switch measure {
+        case .inch: 1
+        case .millimeter: 25.4
+        case .tenthsOfAMillimeter: 254
+        }
     }
 
     private enum Axis { case x, y }
@@ -431,9 +471,11 @@ private struct Walk {
                         at: record.offset))
             }
             if mode == .none, let data = record.data, state.bytesPerPixel > 0 {
-                // Uncompressed rows are padded to a multiple of four bytes, so the block's size is exact.
+                // Uncompressed rows are padded to a multiple of PadBytesMultiple, four by default,
+                // so the block's size is exact.
+                let multiple = record[.padBytesMultiple]?.intValue ?? 4
                 let bytesPerRow = state.width * state.bytesPerPixel
-                let padded = bytesPerRow + (-bytesPerRow & 3)
+                let padded = multiple > 0 ? (bytesPerRow + multiple - 1) / multiple * multiple : bytesPerRow
                 let blockHeight = record[.blockHeight]?.intValue ?? 0
                 if data.count != padded * blockHeight {
                     findings.append(
@@ -618,12 +660,19 @@ private struct OperatorSpec {
                 continue
             }
             guard let range = spec.values else { continue }
-            for value in numbers(of: attribute.value) where !range.contains(value) || spec.excluding.contains(value) {
-                findings.append(
-                    .error(
-                        "attribute-value", "\(label(attribute)) is \(value), outside \(range.lowerBound)…\(range.upperBound)",
-                        at: attribute.offset))
-                break
+            for number in numbers(of: attribute.value) {
+                guard let value = number else {
+                    findings.append(
+                        .error("attribute-value", "\(label(attribute)) is not a number any printer could use", at: attribute.offset))
+                    break
+                }
+                if !range.contains(value) || spec.excluding.contains(value) {
+                    findings.append(
+                        .error(
+                            "attribute-value", "\(label(attribute)) is \(value), outside \(range.lowerBound)…\(range.upperBound)",
+                            at: attribute.offset))
+                    break
+                }
             }
         }
 
@@ -637,12 +686,16 @@ private struct OperatorSpec {
         attribute.attribute.map { String(describing: $0) } ?? "attribute \(attribute.id)"
     }
 
-    private func numbers(of value: PCLXLValue) -> [Int] {
+    /// The integers in a value, for range checking. A `real32` that no `Int` can represent — NaN,
+    /// an infinity, something astronomically large — is reported by the caller as out of range
+    /// rather than converted, because converting it would trap on a job this tool is meant to
+    /// survive reading.
+    private func numbers(of value: PCLXLValue) -> [Int?] {
         switch value {
         case .integer(let number): [number]
         case .integers(let numbers): numbers
-        case .real(let number): [Int(number)]
-        case .reals(let numbers): numbers.map(Int.init)
+        case .real(let number): [Int(exactly: number.rounded())]
+        case .reals(let numbers): numbers.map { Int(exactly: $0.rounded()) }
         case .bytes: []
         }
     }

@@ -108,9 +108,18 @@ public enum PCLXLReader {
 
         while true {
             scanner.skipWhiteSpace()
-            guard let tag = scanner.peek() else { break }
+            guard let tag = scanner.peek() else {
+                guard pending.isEmpty else {
+                    throw PCLXLError.malformed("\(pending.count) attribute(s) at the end of the stream have no operator")
+                }
+                break
+            }
             if tag == 0x1B {
                 guard scanner.matches(uel) else { throw PCLXLError.unexpectedTag(tag, offset: scanner.offset) }
+                guard pending.isEmpty else {
+                    throw PCLXLError.malformed(
+                        "\(pending.count) attribute(s) before the closing UEL at offset \(scanner.offset) have no operator")
+                }
                 scanner.advance(by: uel.count)
                 break
             }
