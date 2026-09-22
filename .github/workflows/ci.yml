@@ -42,7 +42,7 @@ jobs:
       # What the rasteriser really produces for every mono paper, against the recorded fixture the
       # width unit tests assert (#27). Evidence for the validator, independent of its arithmetic.
       - name: Mono raster headers for every offered paper
-        run: scripts/capture-mono-headers.sh
+        run: scripts/capture-mono-headers.sh --check Tests/Fixtures/mono-raster-headers.tsv
 
       # Builds the unsigned installer package too, and checks every ready-made job against its raster.
       - name: Build the hardware visit kit

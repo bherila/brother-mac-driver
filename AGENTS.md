@@ -89,8 +89,12 @@ repository's own `Package.swift`.
   paper the HL-2140 PPD offers, at 600 dpi and (through a test-only copy of the PPD) at 300 dpi, it
   records the first page header the macOS rasteriser produces and the PJL the filter declares.
   The header is read by `scripts/raster-header.py`, which shares no code with the driver, so the
-  numbers are not the validator agreeing with itself. When a width expectation changes, it has to
-  be because the rasteriser was shown to produce something different — not because the helper did.
+  numbers are not the validator agreeing with itself. The result is recorded in
+  `Tests/Fixtures/mono-raster-headers.tsv`, which `MonoRasterHeaderFixtureTests` asserts the
+  width helper against; CI re-captures with `--check` and fails if the rasteriser, the PPD or the
+  paper list has moved away from it. When a width expectation changes, it has to be because the
+  rasteriser was shown to produce something different — not because the helper did. To update
+  the fixture, take the table from that CI step's log, not from a local edit.
 - **`pxltool check`** — the preflight: what pixel comparison cannot see (attribute types, operator
   nesting, protocol class, PJL spellings, block framing, images falling off the sheet). It sorts
   what it finds into three kinds, because they are answerable by different evidence and conflating

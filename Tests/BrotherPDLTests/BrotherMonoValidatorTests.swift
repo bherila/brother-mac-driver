@@ -281,8 +281,9 @@ private func patched(_ job: [UInt8], replacing text: String, with replacement: S
     }
 
     @Test func theWidthImpliedByEachPaperIsTheOneTheRasteriserProduces() {
-        // Letter and A4 at 600 dpi, less brlaser's 8 pt side margins: the widths the end-to-end
-        // test observes coming out of the macOS rasteriser.
+        // Letter and A4 at 600 dpi, less brlaser's 8 pt side margins, and Letter at 300. Every
+        // offered paper at both resolutions is checked against the rasteriser's recorded output in
+        // MonoRasterHeaderFixtureTests; these three stay as a readable spot check.
         #expect(BrotherMonoValidator.bytesPerRow(paper: "LETTER", resolution: "600") == 621)
         #expect(BrotherMonoValidator.bytesPerRow(paper: "A4", resolution: "600") == 604)
         #expect(BrotherMonoValidator.bytesPerRow(paper: "LETTER", resolution: "300") == 311)
