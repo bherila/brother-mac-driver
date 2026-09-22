@@ -40,6 +40,7 @@ swift build -c release
 swift test                 # unit tests, no system dependencies
 shellcheck scripts/*.sh    # CI fails on style findings too, not just errors
 scripts/e2e-test.sh        # PDF → the system rasteriser → the filter → decode → pixel compare
+scripts/capture-mono-headers.sh  # the mono raster header for every offered paper, 600 and 300 dpi
 scripts/make-visit-kit.sh  # builds the installer, the ready-made jobs, and checks every one
 scripts/test-queue.sh      # after installing: print through the real print system into a listener
 ```
@@ -84,6 +85,12 @@ repository's own `Package.swift`.
 - **`scripts/e2e-test.sh`** — the real macOS rasteriser and the real filter binary, then the output
   decoded and compared pixel for pixel with the raster that produced it. Also the failure paths: a
   raster that stops mid-page, a page the backend must refuse, a non-blocking stdout.
+- **`scripts/capture-mono-headers.sh`** — the evidence behind the mono row-width check. For every
+  paper the HL-2140 PPD offers, at 600 dpi and (through a test-only copy of the PPD) at 300 dpi, it
+  records the first page header the macOS rasteriser produces and the PJL the filter declares.
+  The header is read by `scripts/raster-header.py`, which shares no code with the driver, so the
+  numbers are not the validator agreeing with itself. When a width expectation changes, it has to
+  be because the rasteriser was shown to produce something different — not because the helper did.
 - **`pxltool check`** — the preflight: what pixel comparison cannot see (attribute types, operator
   nesting, protocol class, PJL spellings, block framing, images falling off the sheet). It sorts
   what it finds into three kinds, because they are answerable by different evidence and conflating
