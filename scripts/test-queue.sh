@@ -103,7 +103,7 @@ if [[ "$ppd_source" == "installed" ]]; then
     match_count="$(grep -c . <<<"$matches")"
     if ((match_count > 1)); then
         echo "cupsd offers $wanted from $match_count places, so which one a queue would get is ambiguous:" >&2
-        sed 's/^/  /' <<<"$matches" >&2
+        while IFS= read -r uri; do echo "  $uri" >&2; done <<<"$matches"
         exit 1
     fi
     model_uri="$matches"

@@ -38,10 +38,16 @@ logic. That split is what keeps the encoders unit-testable.
 ```sh
 swift build -c release
 swift test                 # unit tests, no system dependencies
+shellcheck scripts/*.sh    # CI fails on style findings too, not just errors
 scripts/e2e-test.sh        # PDF → the system rasteriser → the filter → decode → pixel compare
 scripts/make-visit-kit.sh  # builds the installer, the ready-made jobs, and checks every one
 scripts/test-queue.sh      # after installing: print through the real print system into a listener
 ```
+
+`shellcheck` runs in CI and fails the build on findings it only calls "style", so a script change
+that has not been through it is a red build waiting to happen. It installs anywhere
+(`brew install shellcheck`, `apt-get install shellcheck`, `pip install shellcheck-py`), needs no
+macOS, and takes a second — there is no reason to leave it to CI.
 
 Needs macOS with Xcode 26 or later. CI runs all of it on `macos-26`, plus a second job that
 installs the driver, prints through a real CUPS queue for every model PPD, and uninstalls again.
