@@ -15,17 +15,28 @@ if [[ "$want" != "present" && "$want" != "absent" ]]; then
     exit 64
 fi
 
+# `lpinfo -m | grep -q` looks right and is a trap: grep exits at its first match, lpinfo dies of
+# SIGPIPE, and under `set -o pipefail` the pipeline then reports failure even though the driver was
+# found. That reads as "absent" — which would make the check after uninstalling pass while the
+# driver is still installed. So the listing is taken once and searched without a pipe.
+driver_listed() {
+    local listing
+    listing="$(lpinfo -m 2>/dev/null || true)"
+    grep -q "brother-mac-driver" <<<"$listing"
+}
+
 elapsed=0
 while true; do
     found=0
-    lpinfo -m 2>/dev/null | grep -q "brother-mac-driver" && found=1
+    driver_listed && found=1
     if [[ "$want" == "present" && "$found" -eq 1 ]] || [[ "$want" == "absent" && "$found" -eq 0 ]]; then
         echo "the print system reports this driver as $want"
         exit 0
     fi
     if ((elapsed >= timeout_seconds)); then
         echo "after ${timeout_seconds}s the print system still does not report this driver as $want" >&2
-        lpinfo -m 2>/dev/null | grep -i brother || echo "  (no Brother drivers listed at all)" >&2
+        brother="$(lpinfo -m 2>/dev/null || true)"
+        grep -i brother <<<"$brother" || echo "  (no Brother drivers listed at all)" >&2
         exit 1
     fi
     sleep 2

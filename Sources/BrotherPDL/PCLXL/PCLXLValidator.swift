@@ -113,8 +113,16 @@ public enum PCLXLValidator {
             return [.error("pjl-eoj", "the job opens with \(quoted(job)) and never closes with an @PJL EOJ")]
         }
         let closing = quotedName(of: eoj, keyword: "@PJL EOJ NAME=")
+        // An unquoted name reads as nil, and two nils are not a match: comparing them first would
+        // let a pair of malformed lines pass as a well-formed job.
+        guard let name else {
+            return [.error("pjl-eoj", "cannot read the job name from \(quoted(job))")]
+        }
+        guard let closing else {
+            return [.error("pjl-eoj", "cannot read the job name from \(quoted(eoj))")]
+        }
         guard closing == name else {
-            return [.error("pjl-eoj", "@PJL EOJ names \(quoted(closing ?? "")) where @PJL JOB named \(quoted(name ?? ""))")]
+            return [.error("pjl-eoj", "@PJL EOJ names \(quoted(closing)) where @PJL JOB named \(quoted(name))")]
         }
         return []
     }
@@ -133,9 +141,11 @@ public enum PCLXLValidator {
             findings.append(.error("stream-header", "unreadable stream header \(quoted(header))"))
             return (2, 0)
         }
-        // 2.0 and 2.1 are the classes this driver emits; anything else, negative minors included,
-        // is a stream it did not write.
-        if (major, minor) != (2, 0) && (major, minor) != (2, 1) {
+        // A negative version is not a protocol class at all, so a printer rejects the stream. A
+        // positive one this driver does not emit is legal PCL XL, which is a warning here.
+        if major < 0 || minor < 0 {
+            findings.append(.error("stream-header", "protocol class \(major).\(minor) is not a version"))
+        } else if (major, minor) != (2, 0) && (major, minor) != (2, 1) {
             findings.append(
                 .warning("stream-header", "protocol class \(major).\(minor) is not one this driver has support for"))
         }

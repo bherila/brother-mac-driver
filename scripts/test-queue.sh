@@ -82,7 +82,8 @@ if [[ "$ppd_source" == "installed" ]]; then
         echo "no installed PPD at $installed (run scripts/install.sh first)" >&2
         exit 1
     fi
-    model_uri="$(lpinfo -m 2>/dev/null | grep -F "$(basename "$installed")" | head -1 | awk '{print $1}')"
+    listing="$(lpinfo -m 2>/dev/null || true)"
+    model_uri="$(awk -v name="$(basename "$installed")" 'index($1, name) { print $1; exit }' <<<"$listing")"
     if [[ -z "$model_uri" ]]; then
         echo "cupsd does not offer $(basename "$installed"); it may not have indexed it yet" >&2
         exit 1
@@ -163,8 +164,10 @@ else
     echo
 fi
 
-# The test PDF has two pages, and a duplex job may be padded to an even count, never a shorter one.
-if [[ "$pages" -lt 2 ]]; then
+# The test PDF has two pages. Two is already even, so duplex padding adds nothing, and anything
+# other than two means the print system lost or multiplied a page. (A run that asks for printer
+# copies would legitimately send more; this script does not.)
+if [[ "$pages" -ne 2 ]]; then
     echo "the captured job has $pages page(s); the job sent had 2" >&2
     exit 1
 fi

@@ -565,3 +565,31 @@ extension UInt32 {
         #expect(findings.isEmpty, "\(findings)")
     }
 }
+
+// MARK: - Findings from the third external review of this file
+
+@Suite struct PCLXLValidatorThirdReviewTests {
+    @Test func aNegativeProtocolClassIsAnErrorRatherThanAWarning() throws {
+        // There is no such version, so a printer rejects the stream — unlike a positive class this
+        // driver merely does not emit, which is legal PCL XL.
+        let negative = patched(try goodJob(), replacing: ") HP-PCL XL;2;0;", with: ") HP-PCL XL;2;-1;")
+        let findings = PCLXLValidator.check(job: negative)
+        #expect(findings.contains { $0.rule == "stream-header" && $0.severity == .error })
+
+        let unsupported = patched(try goodJob(), replacing: ") HP-PCL XL;2;0;", with: ") HP-PCL XL;3;0;")
+        let softer = PCLXLValidator.check(job: unsupported)
+        #expect(softer.contains { $0.rule == "stream-header" && $0.severity == .warning })
+        #expect(!softer.hasErrors, "\(softer)")
+    }
+
+    @Test func twoUnreadableJobNamesAreNotAMatchingPair() throws {
+        // Both names fail to parse, so both read as nil. Comparing them first would let a job whose
+        // PJL is malformed at both ends pass as well-formed.
+        var options = JobOptions()
+        options.jobName = "third review"
+        var job = try goodJob(options: options)
+        job = patched(job, replacing: "@PJL JOB NAME=\"third review\"", with: "@PJL JOB NAME=third review   ")
+        job = patched(job, replacing: "@PJL EOJ NAME=\"third review\"", with: "@PJL EOJ NAME=other job      ")
+        #expect(rules(PCLXLValidator.check(job: job)).contains("pjl-eoj"))
+    }
+}
