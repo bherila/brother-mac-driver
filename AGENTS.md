@@ -40,6 +40,7 @@ swift build -c release
 swift test                 # unit tests, no system dependencies
 shellcheck scripts/*.sh    # CI fails on style findings too, not just errors
 scripts/e2e-test.sh        # PDF → the system rasteriser → the filter → decode → pixel compare
+scripts/raster-header-test.py    # the independent raster header reader, including what it must refuse
 scripts/capture-mono-headers.sh  # the mono raster header for every offered paper, 600 and 300 dpi
 scripts/make-visit-kit.sh  # builds the installer, the ready-made jobs, and checks every one
 scripts/test-queue.sh      # after installing: print through the real print system into a listener
@@ -89,7 +90,9 @@ repository's own `Package.swift`.
   paper the HL-2140 PPD offers, at 600 dpi and (through a test-only copy of the PPD) at 300 dpi, it
   records the first page header the macOS rasteriser produces and the PJL the filter declares.
   The header is read by `scripts/raster-header.py`, which shares no code with the driver, so the
-  numbers are not the validator agreeing with itself. The result is recorded in
+  numbers are not the validator agreeing with itself. It reads CUPS raster versions 2 and 3 only
+  and refuses anything else rather than guess; `scripts/raster-header-test.py` holds it to that,
+  runs anywhere with Python 3, and needs no macOS. The result is recorded in
   `Tests/Fixtures/mono-raster-headers.tsv`, which `MonoRasterHeaderFixtureTests` asserts the
   width helper against; CI re-captures with `--check` and fails if the rasteriser, the PPD or the
   paper list has moved away from it. When a width expectation changes, it has to be because the
