@@ -96,6 +96,11 @@ public enum PCLXLValidator {
                         "the last PJL line before the stream is \(quoted(last)), not @PJL ENTER LANGUAGE=PCLXL"))
             }
         }
+        // The first ENTER LANGUAGE leaves PJL, so a second one is read as stream data, not as PJL.
+        let entered = stream.pjlHeader.filter { $0.hasPrefix("@PJL ENTER LANGUAGE") }.count
+        if entered > 1 {
+            findings.append(.error("pjl-enter-language", "the PJL header enters a language \(entered) times"))
+        }
         return findings
     }
 
@@ -171,13 +176,20 @@ private struct Walk {
     private var sheet: (width: Int, height: Int)?
     private var cursor: (x: Int, y: Int)?
     private var colorSpace: PCLXLColorSpace?
+    /// Where the page's coordinate origin has been moved to, from SetPageOrigin.
+    private var pageOrigin = (x: 0, y: 0)
+    /// What PushGS saved, innermost last.
+    private var graphicsState: [(cursor: (x: Int, y: Int)?, colorSpace: PCLXLColorSpace?, pageOrigin: (x: Int, y: Int))] = []
 
     /// What the open image declared, and how much of it has arrived.
     private struct Image {
         var width: Int
         var height: Int
-        var bytesPerPixel: Int
+        var bitsPerPixel: Int
         var rowsRead = 0
+
+        /// The packed row, before any padding.
+        var bytesPerRow: Int { (width * bitsPerPixel + 7) / 8 }
     }
 
     init(protocolClass: (major: Int, minor: Int)) {
@@ -186,8 +198,12 @@ private struct Walk {
 
     mutating func visit(_ record: PCLXLOperatorRecord, into findings: inout [PDLFinding]) {
         guard let op = PCLXLOperator(rawValue: record.tag) else {
+            // Telling a legal operator this driver does not model (SetPenWidth, say) from a tag no
+            // printer assigns would need the whole operator table, which this project does not have
+            // a source for. Either way it is not something this driver should be emitting, which is
+            // what a warning means here — so it is reported without claiming the printer would balk.
             findings.append(
-                .error(
+                .warning(
                     "operator", "operator 0x\(String(record.tag, radix: 16)) is not one this driver emits",
                     at: record.offset))
             return
@@ -212,6 +228,10 @@ private struct Walk {
         }
         if image != nil {
             findings.append(.error("image", "the stream ends inside an image"))
+        }
+        if !graphicsState.isEmpty {
+            findings.append(
+                .warning("graphics-state", "\(graphicsState.count) PushGS without a matching PopGS"))
         }
         if sessionEnded && pages == 0 {
             findings.append(.warning("page", "the job contains no pages"))
@@ -273,10 +293,17 @@ private struct Walk {
             pageOpen = true
             pages += 1
             images = 0
-            // A page starts with a fresh graphics state: the cursor and colour space do not carry over.
+            // A page starts with a fresh graphics state: none of this carries over from the last one.
             cursor = nil
             colorSpace = nil
+            pageOrigin = (0, 0)
+            graphicsState = []
             sheet = sheetSize(record, into: &findings)
+            // A landscape page is the same sheet turned on its side, so its bounds are too.
+            let orientation = (record[.orientation]?.intValue).flatMap { UInt8(exactly: $0) }.flatMap(PCLXLOrientation.init)
+            if orientation == .landscape || orientation == .reverseLandscape, let portrait = sheet {
+                sheet = (width: portrait.height, height: portrait.width)
+            }
             duplexAttributes(record, into: &findings)
 
         case .endPage:
@@ -303,6 +330,10 @@ private struct Walk {
         case .setPageOrigin:
             require(pageOpen, "page", "SetPageOrigin outside a page")
             require(image == nil, "image", "SetPageOrigin inside an image, where only image data may go")
+            // The new origin is given in the current coordinate system, so the shifts accumulate.
+            if let point = xy(record, .point) {
+                pageOrigin = (pageOrigin.x + point.x, pageOrigin.y + point.y)
+            }
 
         case .setColorSpace:
             require(pageOpen, "page", "SetColorSpace outside a page")
@@ -321,8 +352,21 @@ private struct Walk {
         case .endImage:
             endImage(record, into: &findings)
 
-        case .pushGS, .popGS:
-            require(image == nil, "image", "\(op) inside an image, where only image data may go")
+        case .pushGS:
+            require(image == nil, "image", "PushGS inside an image, where only image data may go")
+            require(pageOpen, "page", "PushGS outside a page")
+            graphicsState.append((cursor: cursor, colorSpace: colorSpace, pageOrigin: pageOrigin))
+
+        case .popGS:
+            require(image == nil, "image", "PopGS inside an image, where only image data may go")
+            require(pageOpen, "page", "PopGS outside a page")
+            guard let restored = graphicsState.popLast() else {
+                require(false, "graphics-state", "PopGS with nothing pushed underflows the printer's stack")
+                break
+            }
+            cursor = restored.cursor
+            colorSpace = restored.colorSpace
+            pageOrigin = restored.pageOrigin
 
         case .comment:
             break
@@ -437,20 +481,26 @@ private struct Walk {
                     at: record.offset))
         }
         if let sheet {
-            let right = cursor.x + destination.x
-            let bottom = cursor.y + destination.y
-            if cursor.x < 0 || cursor.y < 0 || right > sheet.width || bottom > sheet.height {
+            let left = pageOrigin.x + cursor.x
+            let top = pageOrigin.y + cursor.y
+            let right = left + destination.x
+            let bottom = top + destination.y
+            if left < 0 || top < 0 || right > sheet.width || bottom > sheet.height {
                 findings.append(
                     .error(
                         "image-off-sheet",
-                        "image covers \(cursor.x),\(cursor.y)–\(right),\(bottom) of a \(sheet.width)×\(sheet.height) sheet",
+                        "image covers \(left),\(top)–\(right),\(bottom) of a \(sheet.width)×\(sheet.height) sheet",
                         at: record.offset))
             }
         }
         let depth = record[.colorDepth]?.intValue
         let bitsPerComponent = depth == Int(PCLXLColorDepth.bits8.rawValue) ? 8 : depth == Int(PCLXLColorDepth.bits4.rawValue) ? 4 : 1
-        let components = colorSpace == .gray ? 1 : 3
-        image = Image(width: width, height: height, bytesPerPixel: bitsPerComponent * components / 8)
+        // An indexed image carries one index per pixel whatever the colour space; a direct one
+        // carries a component per channel. At 1 or 4 bits a pixel is narrower than a byte, so the
+        // row is measured in bits and rounded up once, at the end.
+        let indexed = record[.colorMapping]?.intValue == Int(PCLXLColorMapping.indexedPixel.rawValue)
+        let components = indexed || colorSpace == .gray ? 1 : 3
+        image = Image(width: width, height: height, bitsPerPixel: bitsPerComponent * components)
     }
 
     private mutating func readImage(_ record: PCLXLOperatorRecord, into findings: inout [PDLFinding]) {
@@ -470,11 +520,11 @@ private struct Walk {
                             + "\(protocolClass.major).\(protocolClass.minor)",
                         at: record.offset))
             }
-            if mode == .none, let data = record.data, state.bytesPerPixel > 0 {
+            if mode == .none, let data = record.data, state.bitsPerPixel > 0 {
                 // Uncompressed rows are padded to a multiple of PadBytesMultiple, four by default,
                 // so the block's size is exact.
                 let multiple = record[.padBytesMultiple]?.intValue ?? 4
-                let bytesPerRow = state.width * state.bytesPerPixel
+                let bytesPerRow = state.bytesPerRow
                 let padded = multiple > 0 ? (bytesPerRow + multiple - 1) / multiple * multiple : bytesPerRow
                 let blockHeight = record[.blockHeight]?.intValue ?? 0
                 if data.count != padded * blockHeight {
@@ -482,7 +532,7 @@ private struct Walk {
                         .error(
                             "image-data-length",
                             "uncompressed block carries \(data.count) bytes, not the \(padded * blockHeight) "
-                                + "that \(blockHeight) rows of \(state.width) pixels need",
+                                + "that \(blockHeight) rows of \(state.width) pixels at \(state.bitsPerPixel) bits need",
                             at: record.offset))
                 }
             }
@@ -525,9 +575,18 @@ private struct Walk {
         image = nil
     }
 
+    /// An xy pair, whichever numeric shape it was sent in. A real is rounded; one no `Int` can hold
+    /// is treated as absent, because the attribute rules have already reported it.
     private func xy(_ record: PCLXLOperatorRecord, _ attribute: PCLXLAttribute) -> (x: Int, y: Int)? {
-        guard let values = record[attribute]?.intArray, values.count == 2 else { return nil }
-        return (values[0], values[1])
+        switch record[attribute] {
+        case .integers(let values) where values.count == 2:
+            return (values[0], values[1])
+        case .reals(let values) where values.count == 2:
+            guard let x = Int(exactly: values[0].rounded()), let y = Int(exactly: values[1].rounded()) else { return nil }
+            return (x, y)
+        default:
+            return nil
+        }
     }
 }
 

@@ -255,7 +255,9 @@ private struct Scan {
         offset += 2
 
         let dataLength = declared - 2
-        guard dataLength >= 0, offset + dataLength <= bytes.count else {
+        // Both sides are non-negative and bounded by the job, so this cannot overflow the way
+        // `offset + dataLength` can when a malformed block claims a length near Int.max.
+        guard dataLength >= 0, dataLength <= bytes.count - offset else {
             error("block", "block claims \(declared) bytes, which runs past the end of the job", at: start)
             return nil
         }
@@ -418,15 +420,26 @@ private struct Scan {
         return lines
     }
 
+    /// A decimal field. Returns nil when there are no digits, and `Int.max` when there are so many
+    /// that the value cannot be held — either way the caller rejects it, which beats trapping on a
+    /// malformed job this tool exists to read.
     private mutating func decimal() -> Int? {
         var value = 0
         var digits = 0
+        var overflowed = false
         while offset < bytes.count, (0x30...0x39).contains(bytes[offset]) {
-            value = value * 10 + Int(bytes[offset] - 0x30)
+            let (scaled, scaleOverflow) = value.multipliedReportingOverflow(by: 10)
+            let (sum, sumOverflow) = scaled.addingReportingOverflow(Int(bytes[offset] - 0x30))
+            if scaleOverflow || sumOverflow {
+                overflowed = true
+            } else {
+                value = sum
+            }
             offset += 1
             digits += 1
         }
-        return digits > 0 ? value : nil
+        guard digits > 0 else { return nil }
+        return overflowed ? Int.max : value
     }
 
     /// The number in an escape sequence like `ESC &l<n>X`, consumed when it is there.

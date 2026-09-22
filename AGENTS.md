@@ -81,8 +81,11 @@ repository's own `Package.swift`.
 - **`pxltool check`** — the preflight: what a printer would reject in a finished job, which pixel
   comparison cannot see (attribute types, operator nesting, protocol class, PJL spellings, block
   framing, images falling off the sheet). Runs over every job the e2e test and the visit kit build.
-- **`scripts/test-queue.sh`** — cupsd itself: the installed PPD, the filter run the way CUPS runs
-  it, the options a print dialog sets, and the bytes that reach the backend.
+- **`scripts/test-queue.sh`** — cupsd itself: the filter run the way CUPS runs it, the options a
+  print dialog sets, and the bytes that reach the backend. `PPD_SOURCE=installed` builds the queue
+  from the PPD the installer put in `/Library/Printers`, chosen by the model name cupsd indexed —
+  the way System Settings does it — so the file under test is the one a user gets. CI runs every
+  model that way.
 
 A change to an encoder that no check notices is a change without evidence. Add the check.
 

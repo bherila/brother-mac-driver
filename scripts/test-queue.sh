@@ -3,8 +3,12 @@
 # localhost instead of real (USB) hardware, so the queue/filter/capture path can be
 # exercised without a printer attached.
 #
-# usage: [MODEL=<name>] scripts/test-queue.sh [-o key=value ...]
+# usage: [MODEL=<name>] [PPD_SOURCE=generated|installed] scripts/test-queue.sh [-o key=value ...]
 #   MODEL picks the PPD (default MFC-9330CDW; e.g. MODEL=HL-2140-series).
+#   PPD_SOURCE=installed builds the queue from the PPD the installer put in
+#     /Library/Printers/PPDs, chosen by the model name cupsd indexed — the way System Settings
+#     does it — so what is tested is the file a user actually gets. The default, `generated`,
+#     uses a freshly generated PPD, which is what a developer wants before installing anything.
 #   Extra arguments are passed straight through to `lp`, so specific PPD options
 #   (e.g. -o BRCompression=DeltaRow) can be exercised.
 set -euo pipefail
@@ -14,6 +18,8 @@ build_dir="${BUILD_DIR:-$repo_root/.build/release}"
 pxltool="$build_dir/pxltool"
 queue="BrotherOSS_Test"
 port=9100
+ppd_source="${PPD_SOURCE:-generated}"
+installed_ppd_dir="/Library/Printers/PPDs/Contents/Resources"
 filter_path="/Library/Printers/BrotherOSS/filter/rastertobrother"
 timeout_seconds=120
 
@@ -68,13 +74,38 @@ if [[ ! -f "$ppd" ]]; then
     exit 1
 fi
 
+# How the queue gets its PPD. Naming the installed file by hand would bypass cupsd's own index,
+# which is what a print dialog picks from, so the installed case asks cupsd for it by model name.
+if [[ "$ppd_source" == "installed" ]]; then
+    installed="$installed_ppd_dir/$(basename "$ppd").gz"
+    if [[ ! -f "$installed" ]]; then
+        echo "no installed PPD at $installed (run scripts/install.sh first)" >&2
+        exit 1
+    fi
+    model_uri="$(lpinfo -m 2>/dev/null | grep -F "$(basename "$installed")" | head -1 | awk '{print $1}')"
+    if [[ -z "$model_uri" ]]; then
+        echo "cupsd does not offer $(basename "$installed"); it may not have indexed it yet" >&2
+        exit 1
+    fi
+    echo "using the installed PPD, as cupsd offers it: $model_uri"
+    # Unpacked only to read *BRBackend below; the queue uses cupsd's copy, not this one.
+    gzip -dc "$installed" >"$work/installed.ppd"
+    ppd="$work/installed.ppd"
+    ppd_option=(-m "$model_uri")
+elif [[ "$ppd_source" == "generated" ]]; then
+    ppd_option=(-P "$ppd")
+else
+    echo "PPD_SOURCE must be 'generated' or 'installed', not '$ppd_source'" >&2
+    exit 1
+fi
+
 # The listener goes up before the queue exists, so nothing can be sent to the port before it is
 # ready. nc serves one connection and exits; if that happens before our job is done, something
 # else took the connection and the job would only sit in retry until the timeout.
 nc -l 127.0.0.1 "$port" >"$work/capture.pxl" &
 nc_pid=$!
 
-lpadmin -p "$queue" -E -v "socket://127.0.0.1:$port" -P "$ppd" -o printer-is-shared=false
+lpadmin -p "$queue" -E -v "socket://127.0.0.1:$port" "${ppd_option[@]}" -o printer-is-shared=false
 queue_created=1
 
 "$pxltool" testpdf --out "$work/test.pdf" --pages 2

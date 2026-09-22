@@ -81,16 +81,19 @@ jobs:
           # is not instant, so give it a few seconds before believing the answer.
           scripts/wait-for-driver.sh present
 
-      - name: Print through every model's PPD into a fake printer
+      # The PPD under test is the one the installer put in /Library/Printers, selected by the model
+      # name cupsd indexed — so a package that ships a stale or unreadable PPD fails here.
+      - name: Print through every installed PPD into a fake printer
         run: |
           models="$(.build/release/pxltool ppd --out "$RUNNER_TEMP/ppds" | sed 's|.*/Brother-||; s|\.ppd$||')"
           echo "models: $models"
           for model in $models; do
             echo "::group::$model"
-            MODEL="$model" scripts/test-queue.sh
+            MODEL="$model" PPD_SOURCE=installed scripts/test-queue.sh
             echo "::endgroup::"
           done
 
+      # These use the generated PPD, which is the path a developer takes before installing.
       - name: Print with the options the print dialog can set
         run: |
           MODEL=MFC-9330CDW scripts/test-queue.sh -o BRCompression=DeltaRow -o ColorModel=Gray

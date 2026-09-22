@@ -305,7 +305,10 @@ private func ubyteAttribute(_ value: UInt8, _ attribute: PCLXLAttribute) -> [UIn
 /// sends uncompressed data and these rules are about jobs it did not write.
 private func handBuiltJob(
     padBytesMultiple: Int? = nil, imageWidth: Int = 6, imageHeight: Int = 2,
-    dataBytes: Int? = nil, insideImage: ((inout PCLXLWriter) -> Void)? = nil
+    colorDepth: PCLXLColorDepth = .bits8, orientation: PCLXLOrientation = .portrait,
+    cursor: (x: Int, y: Int) = (x: 0, y: 0), pageOrigin: (x: Int, y: Int)? = nil,
+    dataBytes: Int? = nil, beforeImage: ((inout PCLXLWriter) -> Void)? = nil,
+    insideImage: ((inout PCLXLWriter) -> Void)? = nil
 ) -> [UInt8] {
     var writer = PCLXLWriter()
     var job = PCLXLReader.uel
@@ -318,16 +321,21 @@ private func handBuiltJob(
     writer.enumeration(PCLXLDataSource.default, .sourceType)
     writer.enumeration(PCLXLDataOrg.binaryLowByteFirst, .dataOrg)
     writer.op(.openDataSource)
-    writer.enumeration(PCLXLOrientation.portrait, .orientation)
+    writer.enumeration(orientation, .orientation)
     writer.enumeration(PCLXLMediaSize.letter, .mediaSize)
     writer.enumeration(PCLXLSimplexPageMode.frontSide, .simplexPageMode)
     writer.op(.beginPage)
+    if let pageOrigin {
+        writer.uint16XY(pageOrigin.x, pageOrigin.y, .point)
+        writer.op(.setPageOrigin)
+    }
+    beforeImage?(&writer)
     writer.enumeration(PCLXLColorSpace.gray, .colorSpace)
     writer.op(.setColorSpace)
-    writer.uint16XY(0, 0, .point)
+    writer.uint16XY(cursor.x, cursor.y, .point)
     writer.op(.setCursor)
     writer.enumeration(PCLXLColorMapping.directPixel, .colorMapping)
-    writer.enumeration(PCLXLColorDepth.bits8, .colorDepth)
+    writer.enumeration(colorDepth, .colorDepth)
     writer.uint16(imageWidth, .sourceWidth)
     writer.uint16(imageHeight, .sourceHeight)
     writer.uint16XY(imageWidth, imageHeight, .destinationSize)
@@ -335,7 +343,9 @@ private func handBuiltJob(
     insideImage?(&writer)
 
     let multiple = padBytesMultiple ?? 4
-    let padded = (imageWidth + multiple - 1) / multiple * multiple
+    let bits = colorDepth == .bits8 ? 8 : colorDepth == .bits4 ? 4 : 1
+    let packed = (imageWidth * bits + 7) / 8
+    let padded = (packed + multiple - 1) / multiple * multiple
     let data = dataBytes ?? padded * imageHeight
     writer.uint16(0, .startLine)
     writer.uint16(imageHeight, .blockHeight)
@@ -465,5 +475,93 @@ private func handBuiltJob(
 extension UInt32 {
     fileprivate var littleEndianBytes: [UInt8] {
         [0, 8, 16, 24].map { UInt8(truncatingIfNeeded: self >> UInt32($0)) }
+    }
+}
+
+// MARK: - Findings from the second external review of this file
+
+@Suite struct PCLXLValidatorSecondReviewTests {
+    @Test func enteringTheLanguageTwiceIsReported() throws {
+        // The first ENTER LANGUAGE leaves PJL, so the printer reads the second one as stream data.
+        let job = patched(
+            try goodJob(), replacing: "@PJL ENTER LANGUAGE=PCLXL\n",
+            with: "@PJL ENTER LANGUAGE=PCLXL\n@PJL ENTER LANGUAGE=PCLXL\n")
+        #expect(rules(PCLXLValidator.check(job: job)).contains("pjl-enter-language"))
+    }
+
+    @Test(arguments: [(depth: PCLXLColorDepth.bits1, bits: 1), (depth: .bits4, bits: 4)])
+    func aSubByteColourDepthStillHasItsRowLengthChecked(depth: PCLXLColorDepth, bits: Int) {
+        // Integer division used to make such a row zero bytes wide, which skipped the check
+        // altogether: a 1-bit block could then carry any number of bytes at all.
+        let width = 17
+        let packed = (width * bits + 7) / 8
+        let padded = (packed + 3) / 4 * 4
+
+        let right = handBuiltJob(imageWidth: width, colorDepth: depth, dataBytes: padded * 2)
+        let findings = PCLXLValidator.check(job: right)
+        #expect(findings.isEmpty, "\(findings)")
+
+        let wrong = handBuiltJob(imageWidth: width, colorDepth: depth, dataBytes: padded * 2 + 1)
+        #expect(rules(PCLXLValidator.check(job: wrong)).contains("image-data-length"))
+    }
+
+    @Test func anOperatorThisDriverDoesNotEmitIsOnlyAWarning() throws {
+        // 0x77 is SetPenWidth: legal PCL XL, so a printer would accept it. Reporting it as an
+        // error would have `check` claim a legal job is rejectable.
+        let job = patched(
+            try goodJob(), replacing: [PCLXLOperator.endImage.rawValue],
+            with: [0x77, PCLXLOperator.endImage.rawValue])
+        let findings = PCLXLValidator.check(job: job)
+        #expect(rules(findings).contains("operator"))
+        #expect(!findings.hasErrors, "\(findings)")
+    }
+
+    @Test func aPageOriginIsCountedInTheSheetBounds() {
+        // SetPageOrigin moves the origin the cursor is measured from. A small image can be pushed
+        // off the sheet by the origin alone, with nothing wrong with the cursor at all.
+        let onSheet = handBuiltJob(pageOrigin: (x: 10, y: 10))
+        #expect(PCLXLValidator.check(job: onSheet).isEmpty)
+
+        // Letter is 5100 × 6600 at 600 units to the inch.
+        let pushedOff = handBuiltJob(pageOrigin: (x: 5099, y: 10))
+        #expect(rules(PCLXLValidator.check(job: pushedOff)).contains("image-off-sheet"))
+    }
+
+    @Test func aLandscapePageIsTheSheetTurnedOnItsSide() {
+        // 6000 units across is off a portrait Letter sheet and on a landscape one.
+        let wide = handBuiltJob(imageWidth: 600, cursor: (x: 5400, y: 10))
+        #expect(rules(PCLXLValidator.check(job: wide)).contains("image-off-sheet"))
+
+        let landscape = handBuiltJob(imageWidth: 600, orientation: .landscape, cursor: (x: 5400, y: 10))
+        let findings = PCLXLValidator.check(job: landscape)
+        #expect(!rules(findings).contains("image-off-sheet"), "\(findings)")
+    }
+
+    @Test func popGSWithNothingPushedIsReported() {
+        let underflow = handBuiltJob(beforeImage: { writer in writer.op(.popGS) })
+        #expect(rules(PCLXLValidator.check(job: underflow)).contains("graphics-state"))
+
+        // A balanced pair is fine, and restores the cursor and colour space that were saved.
+        let balanced = handBuiltJob(beforeImage: { writer in
+            writer.op(.pushGS)
+            writer.op(.popGS)
+        })
+        let findings = PCLXLValidator.check(job: balanced)
+        #expect(findings.isEmpty, "\(findings)")
+    }
+
+    @Test func aSessionMeasuredInRealsIsReadRatherThanTakenAsZero() throws {
+        // real32XY is legal for UnitsPerMeasure. Reading only the integer shapes made it (0, 0),
+        // which made the sheet zero units across and every image on it off-sheet.
+        let inIntegers: [UInt8] = [
+            PCLXLDataTag.uint16XY.rawValue, 0x58, 0x02, 0x58, 0x02,
+            PCLXLStructureTag.attributeUByte, PCLXLAttribute.unitsPerMeasure.rawValue,
+        ]
+        let sixHundred = Float(600).bitPattern.littleEndianBytes
+        let inReals: [UInt8] = [PCLXLDataTag.real32XY.rawValue] + sixHundred + sixHundred
+            + [PCLXLStructureTag.attributeUByte, PCLXLAttribute.unitsPerMeasure.rawValue]
+
+        let findings = PCLXLValidator.check(job: patched(try goodJob(), replacing: inIntegers, with: inReals))
+        #expect(findings.isEmpty, "\(findings)")
     }
 }

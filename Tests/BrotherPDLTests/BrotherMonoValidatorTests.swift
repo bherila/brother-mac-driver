@@ -241,3 +241,24 @@ private func patched(_ job: [UInt8], replacing text: String, with replacement: S
         #expect(findings.isEmpty, "\(findings)")
     }
 }
+
+@Suite struct BrotherMonoValidatorSecondReviewTests {
+    @Test func aBlockLengthTooLongToHoldIsReportedRatherThanTrapping() throws {
+        // A malformed job can carry any run of digits it likes, and multiplying them out used to
+        // overflow and trap — killing the tool whose job is to describe the malformation.
+        let job = try goodJob(height: 8)
+        let blockStart = try #require(job.firstRange(of: Array("\u{1B}*b1030m".utf8))).upperBound
+        var end = blockStart
+        while job[end] != UInt8(ascii: "w") { end += 1 }
+
+        var patchedJob = job
+        patchedJob.replaceSubrange(blockStart..<end, with: Array(String(repeating: "9", count: 40).utf8))
+        #expect(rules(BrotherMonoValidator.check(job: patchedJob)).contains("block"))
+    }
+
+    @Test func aCopyCountTooLongToHoldIsReportedRatherThanTrapping() throws {
+        let job = patched(
+            try goodJob(), replacing: "\u{1B}&l1X", with: "\u{1B}&l\(String(repeating: "9", count: 40))X")
+        #expect(rules(BrotherMonoValidator.check(job: job)).contains("pcl-copies"))
+    }
+}
