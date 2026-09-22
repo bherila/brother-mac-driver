@@ -66,7 +66,7 @@ app → PDF → cgpdftoraster (macOS) → rastertobrother (this project) → USB
 |---|---|
 | `BrotherPDL` | Pure-Swift encoders for the printer languages (PCL XL, and Brother's host-based mono format as documented by the brlaser project), the PPD generator, and readers for both formats used to check the encoders. No CUPS dependency. |
 | `rastertobrother` | The CUPS filter: reads CUPS raster, writes printer data. |
-| `pxltool` | Developer tool: `dump` and `render` a print job, `compare` a job against the raster it came from, generate the `ppd` files, and draw a calibration `testpdf`. |
+| `pxltool` | Developer tool: `dump` and `render` a print job, `compare` a job against the raster it came from, `check` a job against the rules a printer enforces, generate the `ppd` files, and draw a calibration `testpdf`. |
 | `CCUPS`, `CCUPSShim` | Module map for the `libcups` that ships with macOS, and C wrappers for its PPD API (which Swift cannot call directly). |
 
 Colour pages are sent as RGB and neutral pages as grayscale, decided once per page, so black
@@ -88,10 +88,19 @@ numbered ready-made jobs that each answer one question, a log collector and
 printer over USB, with no print queue involved, and shows what the printer says back.
 
 `test-queue.sh` creates a temporary queue pointed at a listener on localhost, prints a calibration
-page to it, and decodes what the print system actually sent. It needs the driver installed and an
-administrator account, and removes the queue again when it finishes.
+page to it, and decodes and checks what the print system actually sent. It needs the driver
+installed and an administrator account, and removes the queue again when it finishes. CI runs it
+for every model, on a runner with no printer attached.
 
-Requires Xcode 26 or later.
+`pxltool check <job>` is the preflight: it reads a finished job and reports what a printer would
+reject — attributes of the wrong type, operators out of order, a protocol class that does not
+match the compression, PJL a Brother printer does not spell that way, images that fall off the
+sheet. Pixel comparison cannot see any of that, and on a printer it comes back as
+`PCL XL error … Operator: …` and a sheet that never prints. Every job the end-to-end test and the
+visit kit produce is checked this way.
+
+Requires Xcode 26 or later. [AGENTS.md](AGENTS.md) has the conventions, what each check covers,
+and how to run the unit tests on a machine without macOS.
 
 ## Releasing
 

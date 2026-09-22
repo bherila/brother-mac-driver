@@ -77,6 +77,13 @@ Details that are easy to get wrong:
 **Unconfirmed on hardware:** which protocol class Brother's emulation accepts, whether custom
 media sizes are honoured, MediaSource codes for the trays, and duplex back-side orientation.
 
+The rules above are encoded in `PCLXLValidator`, which `pxltool check` runs over a finished job:
+attribute data types and ranges per operator, session/page/image nesting, protocol class against
+the compression used, image row accounting, and whether the images fit the sheet. It is a stand-in
+for the interpreter until there is a real one to try; anything it reports would come back from a
+printer as `PCL XL error … Operator: … Position: …`. `BrotherMonoValidator` does the same for the
+mono format's PJL, PCL envelope and block framing.
+
 ## Brother's host-based mono format (HL-2140 family)
 
 Worked out by the [brlaser](https://github.com/pdewacht/brlaser) project (GPL-2.0-or-later), whose

@@ -54,3 +54,56 @@ jobs:
           name: visit-kit
           path: build/visit-kit.zip
           if-no-files-found: error
+
+  # Everything the other job cannot reach: the installer's real paths, cupsd loading the PPDs,
+  # cupsd running the filter, and the uninstaller taking it all away again. The printer is a
+  # listener on localhost, so this is the whole path except the hardware.
+  print-system:
+    runs-on: macos-26
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: bash -eo pipefail {0}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build (release)
+        run: swift build -c release
+
+      - name: Install
+        run: scripts/install.sh
+
+      - name: The print system offers this driver
+        run: |
+          ls -l /Library/Printers/BrotherOSS/filter/rastertobrother
+          # lpinfo asks cupsd for the drivers it has indexed, so this fails if cupsd cannot read
+          # the PPDs or rejects them. cupsd rebuilds that index when the directory changes, which
+          # is not instant, so give it a few seconds before believing the answer.
+          scripts/wait-for-driver.sh present
+
+      - name: Print through every model's PPD into a fake printer
+        run: |
+          models="$(.build/release/pxltool ppd --out "$RUNNER_TEMP/ppds" | sed 's|.*/Brother-||; s|\.ppd$||')"
+          echo "models: $models"
+          for model in $models; do
+            echo "::group::$model"
+            MODEL="$model" scripts/test-queue.sh
+            echo "::endgroup::"
+          done
+
+      - name: Print with the options the print dialog can set
+        run: |
+          MODEL=MFC-9330CDW scripts/test-queue.sh -o BRCompression=DeltaRow -o ColorModel=Gray
+          MODEL=MFC-9330CDW scripts/test-queue.sh -o Duplex=DuplexNoTumble -o InputSlot=Tray1
+          MODEL=HL-2140-series scripts/test-queue.sh -o BRTonerSaveMode=ON -o PageSize=A4
+
+      - name: Uninstall
+        run: |
+          scripts/uninstall.sh
+          for path in /Library/Printers/BrotherOSS /Library/Printers/PPDs/Contents/Resources/Brother-MFC-9330CDW.ppd.gz; do
+            if [[ -e "$path" ]]; then
+              echo "uninstall left $path behind" >&2
+              exit 1
+            fi
+          done
+          scripts/wait-for-driver.sh absent

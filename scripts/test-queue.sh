@@ -100,11 +100,23 @@ kill "$nc_pid" 2>/dev/null || true
 wait "$nc_pid" 2>/dev/null || true
 nc_pid=""
 
+captured_bytes="$(wc -c <"$work/capture.pxl" | tr -d ' ')"
 echo
-echo "capture: $(wc -c <"$work/capture.pxl" | tr -d ' ') bytes"
+echo "capture: $captured_bytes bytes"
+if ((captured_bytes == 0)); then
+    echo "the print system sent nothing to the listener" >&2
+    exit 1
+fi
+
+# The job came out of the real print system, so this is the closest thing to a printer's verdict
+# that can be had without one: everything a printer would reject, checked on the captured bytes.
+echo "== preflight =="
+"$pxltool" check "$work/capture.pxl"
+
 if grep -q '^\*BRBackend: "pclxl"' "$ppd"; then
     # Dump to a file first: cutting the pipe short with head would fail the pipeline under pipefail.
     "$pxltool" dump "$work/capture.pxl" >"$work/capture.dump"
+    pages="$(grep -c '^page ' "$work/capture.dump" || true)"
     echo "== job dump (first 40 lines) =="
     head -40 "$work/capture.dump"
 
@@ -112,8 +124,17 @@ if grep -q '^\*BRBackend: "pclxl"' "$ppd"; then
     "$pxltool" render "$work/capture.pxl" --out "$render_dir"
     echo "rendered pages: $render_dir"
 else
+    # shellcheck disable=SC2126  # counting occurrences, not matching lines: grep -c would undercount
+    pages="$(LC_ALL=C grep -o -a '1030M' "$work/capture.pxl" | wc -l | tr -d ' ')"
     # The mono format is only checkable against its raster (pxltool compare); show its text preamble.
     echo "== job preamble =="
     head -c 700 "$work/capture.pxl" | LC_ALL=C tr -d '\000' | LC_ALL=C tr -c '[:print:]\n' '.'
     echo
 fi
+
+# The test PDF has two pages, and a duplex job may be padded to an even count, never a shorter one.
+if [[ "$pages" -lt 2 ]]; then
+    echo "the captured job has $pages page(s); the job sent had 2" >&2
+    exit 1
+fi
+echo "queue test passed: $pages page(s) through $queue"

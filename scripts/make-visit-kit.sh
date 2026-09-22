@@ -51,13 +51,14 @@ for entry in "${jobs[@]}"; do
         cupsfilter -p "$ppd" -m application/vnd.cups-raster ${cups_options[@]+"${cups_options[@]}"} \
             "$work/$source.pdf" >"$work/$name.ras" 2>"$log" &&
             PPD="$ppd" "$filter" 1 kit "${name%.*}" 1 "$job_options" "$work/$name.ras" >"$kit/jobs/$name" 2>>"$log" &&
-            "$pxltool" compare "$work/$name.ras" "$kit/jobs/$name" >/dev/null 2>>"$log"
+            "$pxltool" compare "$work/$name.ras" "$kit/jobs/$name" >/dev/null 2>>"$log" &&
+            "$pxltool" check "$kit/jobs/$name" >/dev/null 2>>"$log"
     }; then
         echo "failed to build or verify $name:" >&2
         tail -20 "$log" >&2
         exit 1
     fi
-    printf '  %-34s %8s bytes  verified\n' "$name" "$(wc -c <"$kit/jobs/$name" | tr -d ' ')"
+    printf '  %-34s %8s bytes  verified, preflight clean\n' "$name" "$(wc -c <"$kit/jobs/$name" | tr -d ' ')"
 done
 
 cp "$work/colour.pdf" "$kit/calibration-colour.pdf"
