@@ -192,6 +192,8 @@ private struct Walk {
     private var sheet: (width: Double, height: Double)?
     private var cursor: (x: Double, y: Double)?
     private var colorSpace: PCLXLColorSpace?
+    /// The side the last duplex page declared, to check that the next one turns over.
+    private var lastDuplexSide: Int?
     /// Where the page's coordinate origin has been moved to, from SetPageOrigin.
     private var pageOrigin = (x: 0.0, y: 0.0)
     /// What PushGS saved, innermost last.
@@ -223,6 +225,14 @@ private struct Walk {
                 .warning(
                     "operator", "operator 0x\(String(record.tag, radix: 16)) is not one this driver emits",
                     at: record.offset))
+            // Where it sits is a separate question from what it is: an operator of any kind after
+            // EndSession is outside the session, and saying so does not depend on naming it.
+            if sessionEnded {
+                findings.append(
+                    .error("session", "an operator comes after EndSession", at: record.offset))
+            } else if !sessionOpen {
+                findings.append(.error("session", "an operator appears outside a session", at: record.offset))
+            }
             return
         }
         OperatorSpec.all[op]?.check(record, named: String(describing: op), into: &findings)
@@ -306,6 +316,15 @@ private struct Walk {
             dataSourceOpen = false
 
         case .beginPage:
+            // Code 13 ("eB5Paper") is a defined class-2.1 spelling of JIS B5, which a printer
+            // accepts; this driver sends code 11 for the same sheet, so seeing 13 says the job
+            // came from somewhere else rather than that it will be rejected.
+            if record[.mediaSize]?.intValue == 13 {
+                findings.append(
+                    .warning(
+                        "media-size", "MediaSize 13 is eB5Paper; this driver spells JIS B5 as 11",
+                        at: record.offset))
+            }
             require(!pageOpen, "page", "BeginPage inside a page")
             require(dataSourceOpen, "data-source", "BeginPage with no open data source")
             pageOpen = true
@@ -456,7 +475,24 @@ private struct Walk {
         value == value.rounded() && value.magnitude < 1e15 ? String(Int(value)) : String(value)
     }
 
-    private func duplexAttributes(_ record: PCLXLOperatorRecord, into findings: inout [PDLFinding]) {
+    private mutating func duplexAttributes(_ record: PCLXLOperatorRecord, into findings: inout [PDLFinding]) {
+        // Consecutive duplex pages are the two sides of one sheet, so they have to alternate.
+        // Repeating a side prints them on separate sheets, and every page on its own is valid.
+        if let side = record[.duplexPageSide]?.intValue {
+            if let last = lastDuplexSide, last == side {
+                findings.append(
+                    .warning(
+                        "duplex", "two duplex pages in a row declare the same side, so they will not share a sheet",
+                        at: record.offset))
+            }
+            lastDuplexSide = side
+        } else {
+            lastDuplexSide = nil
+        }
+        duplexModes(record, into: &findings)
+    }
+
+    private func duplexModes(_ record: PCLXLOperatorRecord, into findings: inout [PDLFinding]) {
         let simplex = record[.simplexPageMode] != nil
         let duplex = record[.duplexPageMode] != nil
         if simplex && duplex {
@@ -530,6 +566,23 @@ private struct Walk {
         image = Image(width: width, height: height, bitsPerPixel: bitsPerComponent * components)
     }
 
+    /// How many bytes a compressed ReadImage block decodes to, or nil when it does not decode at
+    /// all. DeltaRow is told how many rows to expect, so a block short of that throws rather than
+    /// returning a short count; either way the caller sees too little data.
+    private func decodedLength(
+        _ mode: PCLXLCompressMode, _ data: [UInt8], bytesPerRow: Int, rows: Int
+    ) -> Int? {
+        switch mode {
+        case .rle:
+            return (try? PCLXLRLE.decode(data))?.count
+        case .deltaRow:
+            guard bytesPerRow > 0 else { return nil }
+            return (try? PCLXLDeltaRow.decode(data, bytesPerRow: bytesPerRow, rowCount: rows))?.count
+        case .none, .jpeg:
+            return nil
+        }
+    }
+
     private mutating func readImage(_ record: PCLXLOperatorRecord, into findings: inout [PDLFinding]) {
         guard var state = image else {
             findings.append(.error("image", "ReadImage outside an image", at: record.offset))
@@ -547,20 +600,54 @@ private struct Walk {
                             + "\(protocolClass.major).\(protocolClass.minor)",
                         at: record.offset))
             }
-            if mode == .none, let data = record.data, state.bitsPerPixel > 0 {
-                // Uncompressed rows are padded to a multiple of PadBytesMultiple, four by default,
-                // so the block's size is exact.
+            if let data = record.data, state.bitsPerPixel > 0, let blockHeight = record[.blockHeight]?.intValue,
+                blockHeight > 0
+            {
+                // Rows are padded to a multiple of PadBytesMultiple, four by default. RLE carries
+                // the padding through the compressed stream; DeltaRow does not, because its rows
+                // are length-prefixed.
                 let multiple = record[.padBytesMultiple]?.intValue ?? 4
                 let bytesPerRow = state.bytesPerRow
                 let padded = multiple > 0 ? (bytesPerRow + multiple - 1) / multiple * multiple : bytesPerRow
-                let blockHeight = record[.blockHeight]?.intValue ?? 0
-                if data.count != padded * blockHeight {
-                    findings.append(
-                        .error(
-                            "image-data-length",
-                            "uncompressed block carries \(data.count) bytes, not the \(padded * blockHeight) "
-                                + "that \(blockHeight) rows of \(state.width) pixels at \(state.bitsPerPixel) bits need",
-                            at: record.offset))
+                switch mode {
+                case .none:
+                    // Uncompressed data is the rows themselves, so the block's size is exact.
+                    if data.count != padded * blockHeight {
+                        findings.append(
+                            .error(
+                                "image-data-length",
+                                "uncompressed block carries \(data.count) bytes, not the \(padded * blockHeight) "
+                                    + "that \(blockHeight) rows of \(state.width) pixels at "
+                                    + "\(state.bitsPerPixel) bits need",
+                                at: record.offset))
+                    }
+                case .rle, .deltaRow:
+                    // A compressed block's declared height is only a claim until the block is
+                    // decoded: an empty or truncated one satisfies every count in the stream while
+                    // leaving the printer nothing to reconstruct the rows from.
+                    let needed = mode == .rle ? padded * blockHeight : bytesPerRow * blockHeight
+                    if let decoded = decodedLength(mode, data, bytesPerRow: bytesPerRow, rows: blockHeight) {
+                        if decoded < needed {
+                            findings.append(
+                                .error(
+                                    "image-data-length",
+                                    "\(mode) block decodes to \(decoded) bytes, not the \(needed) that "
+                                        + "\(blockHeight) rows of \(state.width) pixels at "
+                                        + "\(state.bitsPerPixel) bits need",
+                                    at: record.offset))
+                        }
+                    } else {
+                        findings.append(
+                            .error(
+                                "image-data-length",
+                                "\(mode) block does not decode: the printer cannot reconstruct the "
+                                    + "\(blockHeight) rows it declares",
+                                at: record.offset))
+                    }
+                case .jpeg:
+                    // Nothing here decodes JPEG; the operator table has already said the mode is
+                    // one this driver does not emit.
+                    break
                 }
             }
         }
@@ -677,8 +764,7 @@ private struct OperatorSpec {
         .closeDataSource: OperatorSpec(attributes: []),
         .beginPage: OperatorSpec(attributes: [
             .required(.orientation, Tags.ubyte, 0...3),
-            // Code 13 ("eB5Paper") is a second spelling of JIS B5 that this driver never sends.
-            .optional(.mediaSize, Tags.ubyte, 0...18, excluding: [13]),
+            .optional(.mediaSize, Tags.ubyte, 0...18),
             .optional(.customMediaSize, Tags.unsignedXY, 1...65535),
             .optional(.customMediaSizeUnits, Tags.ubyte, 0...2),
             .optional(.mediaSource, Tags.ubyte, 0...6),

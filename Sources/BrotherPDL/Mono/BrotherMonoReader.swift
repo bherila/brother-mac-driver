@@ -36,8 +36,14 @@ public enum BrotherMonoReader {
             guard let newline = job[offset...].firstIndex(of: 0x0A) else { return false }
             offset = newline + 1
         }
-        while offset < job.count, job[offset] == 0x0D || job[offset] == 0x0A { offset += 1 }
+        // The same set `PCLXLReader` skips before the binding, so the two cannot disagree about
+        // whether a stream header follows.
+        while offset < job.count, isPCLXLWhitespace(job[offset]) { offset += 1 }
         return offset < job.count && job[offset] == UInt8(ascii: ")")
+    }
+
+    private static func isPCLXLWhitespace(_ byte: UInt8) -> Bool {
+        byte == 0x00 || byte == 0x20 || (byte >= 0x09 && byte <= 0x0D)
     }
 
     /// Everything before the first page's raster data: the PJL and PCL setup, as text.

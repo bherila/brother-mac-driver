@@ -29,7 +29,10 @@ public enum BrotherMonoValidator {
     /// with the rows it introduces produces a garbled page, and nothing else here would notice,
     /// because the raster is internally consistent either way.
     public static func bytesPerRow(paper: String?, resolution: String?) -> Int? {
-        guard let paper, let resolution, let dpi = Int(resolution), dpi > 0,
+        // A page header is only as trustworthy as the job it came from: a resolution of
+        // 9223372036854775807 parses as an Int and then overflows the conversion below, so the
+        // range is bounded here rather than trusted. 1200 covers this family's RAS1200MODE.
+        guard let paper, let resolution, let dpi = Int(resolution), (1...1200).contains(dpi),
             let size = MediaSize.all.first(where: { BrotherMonoBackend.pjlPaper($0) == paper })
         else {
             return nil
@@ -135,6 +138,10 @@ private struct Scan {
             error("pjl-job", "cannot read the job name from \(quoted(job))")
         } else if let name = jobName, name.contains("\"") || name.contains("\\") {
             error("pjl-job", "the job name contains a quote or backslash, which PJL cannot escape: \(quoted(name))")
+        } else if let name = jobName, name.contains(where: { !$0.isASCII || $0.asciiValue.map { $0 < 0x20 } == true }) {
+            // PJL carries printable ASCII; the encoder enforces that on the way out, and a header
+            // read back from a capture has to be held to the same rule.
+            error("pjl-job", "the job name is not printable ASCII")
         }
     }
 
@@ -334,7 +341,9 @@ private struct Scan {
         if bytesPerRow == nil, firstOfBlock, !line.blank, !line.gaps {
             bytesPerRow = line.end
         }
-        if let width = bytesPerRow, !line.blank, line.end > width {
+        // The header's width applies even before a whole line reveals the encoded one, which a
+        // block starting with a blank line otherwise leaves unknown for the rest of the block.
+        if let width = bytesPerRow ?? headerBytesPerRow, !line.blank, line.end > width {
             error("line", "line writes \(line.end) bytes into a row of \(width)", at: start)
         }
 

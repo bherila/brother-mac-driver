@@ -300,3 +300,68 @@ private func patched(_ job: [UInt8], replacing text: String, with replacement: S
         #expect(BrotherMonoValidator.check(job: job).isEmpty)
     }
 }
+
+// MARK: - Findings from the fifth external review of this file
+
+@Suite struct BrotherMonoValidatorFifthReviewTests {
+    @Test func aPCLXLJobIsNotClaimedAsMonoBecauseOfHowItsHeaderIsSpaced() {
+        // The PCL XL parser skips NUL, space and the whole 0x09–0x0D run before the binding, so a
+        // job spaced that way is a PCL XL job. Reading the same bytes as mono would hand them to
+        // the wrong validator, and the raster start marker turns up in binary image data often
+        // enough that its presence cannot be the deciding test.
+        var job = PCLXLReader.uel
+        job += Array("@PJL ENTER LANGUAGE=PCLXL\n".utf8)
+        job += [0x00, 0x20, 0x09]
+        job += Array(") HP-PCL XL;2;0;fifth review\n".utf8)
+        job += Array("\u{1B}*b1030m".utf8)
+        job += PCLXLReader.uel
+        #expect(!BrotherMonoReader.recognizes(job))
+    }
+
+    @Test func aRealMonoJobIsStillRecognised() throws {
+        #expect(BrotherMonoReader.recognizes(try goodJob()))
+    }
+
+    @Test func aResolutionTooLargeToMultiplyOutSaysNothingRatherThanTrapping() {
+        // The page header is whatever the job says it is. 1200 is the highest this family reaches,
+        // through RAS1200MODE; past that the figure is not a resolution at all.
+        #expect(BrotherMonoValidator.bytesPerRow(paper: "LETTER", resolution: "1200") == 1242)
+        #expect(BrotherMonoValidator.bytesPerRow(paper: "LETTER", resolution: "1201") == nil)
+        #expect(BrotherMonoValidator.bytesPerRow(paper: "LETTER", resolution: "0") == nil)
+        #expect(BrotherMonoValidator.bytesPerRow(paper: "LETTER", resolution: "9223372036854775807") == nil)
+    }
+
+    @Test func aJobNameThatIsNotPrintableASCIIIsReported() throws {
+        // The encoder cannot emit this; a capture read back from a queue can hold anything, and a
+        // control byte in the middle of a PJL line is not a name the printer will read back out.
+        var options = JobOptions()
+        options.jobName = "review"
+        var job = try goodJob(options: options)
+        job = patched(job, replacing: "JOB NAME=\"review\"", with: "JOB NAME=\"rev\u{01}ew\"")
+        job = patched(job, replacing: "EOJ NAME=\"review\"", with: "EOJ NAME=\"rev\u{01}ew\"")
+        #expect(rules(BrotherMonoValidator.check(job: job)).contains("pjl-job"))
+    }
+
+    @Test func aLineTooWideForTheDeclaredPaperIsReportedFromTheFirstBlankLine() throws {
+        // A block whose first line is blank never reveals the encoded row width, so before this
+        // the rest of the block was unchecked. The paper and resolution in the page header say how
+        // wide a Letter row is at 600 dpi — 621 bytes — which is enough to judge the line.
+        //
+        // The block: a blank line (0xFF), then one substitute whose gap field escapes to
+        // 15 + 255 + 255 + 200 = 725 and writes one byte at the end of it.
+        let data: [UInt8] = [0xFF, 0x01, 0x78, 0xFF, 0xFF, 0xC8, 0x00]
+        var block = Array("\(data.count + 2)w".utf8)
+        block += [0x00, UInt8(2)]
+        block += data
+
+        let job = try goodJob(height: 8)
+        let start = try #require(job.firstRange(of: Array("\u{1B}*b1030m".utf8))).upperBound
+        let end = try #require(job[start...].firstRange(of: Array("1030M".utf8))).lowerBound
+        var patchedJob = job
+        patchedJob.replaceSubrange(start..<end, with: block)
+
+        let findings = BrotherMonoValidator.check(job: patchedJob)
+        #expect(rules(findings).contains("line"), "\(findings)")
+        #expect(findings.first { $0.rule == "line" }?.message.contains("into a row of 621") == true, "\(findings)")
+    }
+}

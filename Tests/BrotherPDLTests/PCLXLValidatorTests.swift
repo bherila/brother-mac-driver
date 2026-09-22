@@ -308,16 +308,23 @@ private func handBuiltJob(
     colorDepth: PCLXLColorDepth = .bits8, orientation: PCLXLOrientation = .portrait,
     cursor: (x: Int, y: Int) = (x: 0, y: 0), pageOrigin: (x: Int, y: Int)? = nil,
     realCursor: (x: Float, y: Float)? = nil, realDestination: (x: Float, y: Float)? = nil,
-    dataBytes: Int? = nil, beforeImage: ((inout PCLXLWriter) -> Void)? = nil,
+    dataBytes: Int? = nil, protocolClass: (major: Int, minor: Int) = (major: 2, minor: 0),
+    compressMode: PCLXLCompressMode = .none, payload: [UInt8]? = nil,
+    beforeSession: [UInt8] = [], afterSession: [UInt8] = [],
+    beforeImage: ((inout PCLXLWriter) -> Void)? = nil,
     insideImage: ((inout PCLXLWriter) -> Void)? = nil
 ) -> [UInt8] {
     var writer = PCLXLWriter()
     var job = PCLXLReader.uel
     job += Array("@PJL \n@PJL ENTER LANGUAGE=PCLXL\n".utf8)
 
-    writer.streamHeader(protocolClass: (major: 2, minor: 0), comment: "hand built")
+    writer.streamHeader(protocolClass: protocolClass, comment: "hand built")
     writer.uint16XY(600, 600, .unitsPerMeasure)
     writer.enumeration(PCLXLMeasure.inch, .measure)
+    if !beforeSession.isEmpty {
+        job += writer.take()
+        job += beforeSession
+    }
     writer.op(.beginSession)
     writer.enumeration(PCLXLDataSource.default, .sourceType)
     writer.enumeration(PCLXLDataOrg.binaryLowByteFirst, .dataOrg)
@@ -355,17 +362,17 @@ private func handBuiltJob(
     let bits = colorDepth == .bits8 ? 8 : colorDepth == .bits4 ? 4 : 1
     let packed = (imageWidth * bits + 7) / 8
     let padded = (packed + multiple - 1) / multiple * multiple
-    let data = dataBytes ?? padded * imageHeight
+    let data = payload?.count ?? dataBytes ?? padded * imageHeight
     writer.uint16(0, .startLine)
     writer.uint16(imageHeight, .blockHeight)
-    writer.enumeration(PCLXLCompressMode.none, .compressMode)
+    writer.enumeration(compressMode, .compressMode)
     if let padBytesMultiple {
         writer.ubyte(UInt8(padBytesMultiple), .padBytesMultiple)
     }
     writer.op(.readImage)
     writer.dataLength(data)
     job += writer.take()
-    job += [UInt8](repeating: 0x80, count: data)
+    job += payload ?? [UInt8](repeating: 0x80, count: data)
 
     writer.op(.endImage)
     writer.uint16(1, .pageCopies)
@@ -373,6 +380,7 @@ private func handBuiltJob(
     writer.op(.closeDataSource)
     writer.op(.endSession)
     job += writer.take()
+    job += afterSession
     return job + PCLXLReader.uel
 }
 
@@ -633,5 +641,78 @@ extension UInt32 {
         // Half a unit further and it genuinely does not fit.
         let over = handBuiltJob(imageWidth: 2, realCursor: (x: 5099.0, y: 10.5), realDestination: (x: 1.5, y: 2.5))
         #expect(rules(PCLXLValidator.check(job: over)).contains("image-off-sheet"))
+    }
+}
+
+// MARK: - Findings from the fifth external review of this file
+
+@Suite struct PCLXLValidatorFifthReviewTests {
+    /// 0x5B is inside the operator range and is not one this driver models, so the validator meets
+    /// it through the unknown-operator path.
+    private static let unknownOperator: UInt8 = 0x5B
+
+    @Test func anUnknownOperatorAfterEndSessionIsStillOutsideTheSession() {
+        let job = handBuiltJob(afterSession: [Self.unknownOperator])
+        let findings = PCLXLValidator.check(job: job)
+        #expect(rules(findings).contains("operator"))
+        #expect(errors(findings).contains { $0.rule == "session" }, "\(findings)")
+    }
+
+    @Test func anUnknownOperatorBeforeBeginSessionIsStillOutsideTheSession() {
+        let job = handBuiltJob(beforeSession: [Self.unknownOperator])
+        let findings = PCLXLValidator.check(job: job)
+        #expect(errors(findings).contains { $0.rule == "session" }, "\(findings)")
+    }
+
+    @Test func eB5PaperIsReportedAsSomethingThisDriverDoesNotSendRatherThanAsInvalid() {
+        // Code 13 is a defined MediaSize a printer accepts, so it is worth saying that the job did
+        // not come from here without claiming the printer would reject it.
+        let job = patched(
+            handBuiltJob(),
+            replacing: ubyteAttribute(PCLXLMediaSize.letter.rawValue, .mediaSize),
+            with: ubyteAttribute(13, .mediaSize))
+        let findings = PCLXLValidator.check(job: job)
+        #expect(rules(findings).contains("media-size"))
+        #expect(errors(findings).isEmpty, "\(findings)")
+    }
+
+    @Test func twoDuplexPagesOnTheSameSideAreReported() throws {
+        var options = JobOptions()
+        options.duplex = .longEdge
+        // The encoder alternates, so the second page's side is the only `back` in the job.
+        let job = patched(
+            try goodJob(pages: 2, options: options),
+            replacing: ubyteAttribute(PCLXLDuplexPageSide.back.rawValue, .duplexPageSide),
+            with: ubyteAttribute(PCLXLDuplexPageSide.front.rawValue, .duplexPageSide))
+        #expect(rules(PCLXLValidator.check(job: job)).contains("duplex"))
+    }
+
+    @Test func anEmptyCompressedBlockDoesNotSatisfyItsDeclaredHeight() {
+        // The row accounting is all declarations: StartLine, BlockHeight and SourceHeight agree
+        // with each other whatever the block holds, so only decoding it shows the rows are absent.
+        let rle = handBuiltJob(compressMode: .rle, payload: [])
+        #expect(rules(PCLXLValidator.check(job: rle)).contains("image-data-length"))
+
+        // The review's own example: two bytes that read as a 251-byte row, in a block of two.
+        let delta = handBuiltJob(protocolClass: (major: 2, minor: 1), compressMode: .deltaRow, payload: [0xFB, 0x00])
+        #expect(rules(PCLXLValidator.check(job: delta)).contains("image-data-length"))
+    }
+
+    @Test func aCompressedBlockShortOfItsDeclaredHeightIsReported() {
+        // A literal packet of one byte: it decodes cleanly and is a row and a half short.
+        let job = handBuiltJob(compressMode: .rle, payload: [0x00, 0x41])
+        let findings = PCLXLValidator.check(job: job)
+        #expect(rules(findings).contains("image-data-length"))
+        #expect(findings.first { $0.rule == "image-data-length" }?.message.contains("decodes to 1 bytes") == true)
+    }
+
+    @Test func aWellFormedCompressedBlockPasses() {
+        // The same two rows the uncompressed job carries, run through the encoder this driver uses.
+        var compressed: [UInt8] = []
+        let rows = [UInt8](repeating: 0x80, count: 8 * 2)
+        rows.withUnsafeBytes { PCLXLRLE.encode($0, into: &compressed) }
+        let job = handBuiltJob(compressMode: .rle, payload: compressed)
+        let findings = PCLXLValidator.check(job: job)
+        #expect(findings.isEmpty, "\(findings)")
     }
 }
