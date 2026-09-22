@@ -4,7 +4,8 @@ import Foundation
 extension PxlTool {
     /// `pxltool check [file] [--bytes-per-row N] [--fail-on errors|policy|all]`
     ///
-    /// Reads a finished print job and checks it against the rules a printer enforces: the PJL
+    /// Reads a finished print job and checks it against the printer language and this driver's
+    /// own output rules — which is not a prediction of what a given printer will reject: the PJL
     /// wrapper, the stream or page framing, every operator's attributes, the row accounting of
     /// every image, and where the images land on the sheet. Nothing is decoded into pixels — that
     /// is what `compare` is for — so this works on a job captured from a queue, where the raster

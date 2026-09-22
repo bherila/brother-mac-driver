@@ -1,4 +1,5 @@
-/// Checks a finished PCL XL job against the rules a printer enforces, without a printer.
+/// Checks a finished PCL XL job against the language specification and this driver's own output
+/// rules, without a printer.
 ///
 /// The reader and the renderer answer "can this be decoded back to the right pixels". They are
 /// forgiving about everything a decoder does not need: a missing attribute it can default, an

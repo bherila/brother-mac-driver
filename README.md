@@ -66,7 +66,7 @@ app → PDF → cgpdftoraster (macOS) → rastertobrother (this project) → USB
 |---|---|
 | `BrotherPDL` | Pure-Swift encoders for the printer languages (PCL XL, and Brother's host-based mono format as documented by the brlaser project), the PPD generator, and readers for both formats used to check the encoders. No CUPS dependency. |
 | `rastertobrother` | The CUPS filter: reads CUPS raster, writes printer data. |
-| `pxltool` | Developer tool: `dump` and `render` a print job, `compare` a job against the raster it came from, `check` a job against the rules a printer enforces, generate the `ppd` files, and draw a calibration `testpdf`. |
+| `pxltool` | Developer tool: `dump` and `render` a print job, `compare` a job against the raster it came from, `check` a job against the printer language and this driver's own output rules, generate the `ppd` files, and draw a calibration `testpdf`. |
 | `CCUPS`, `CCUPSShim` | Module map for the `libcups` that ships with macOS, and C wrappers for its PPD API (which Swift cannot call directly). |
 
 Colour pages are sent as RGB and neutral pages as grayscale, decided once per page, so black

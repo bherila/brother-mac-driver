@@ -23,8 +23,10 @@ enum PxlTool {
           render [file] --out <dir>         write page-001.png … for every page
                        [--width W --height H]
           compare <raster> <job>            check a job pixel for pixel against its CUPS raster
-          check [file] [--strict yes]       check a job against the rules a printer enforces
-                       [--bytes-per-row N]  (--bytes-per-row is for the mono format only)
+          check [file] [--fail-on errors|policy|all]
+                                            preflight a job: protocol errors, and with
+                                            --fail-on policy, legal output this driver should
+                       [--bytes-per-row N]  not produce (--bytes-per-row is for mono only)
           ppd --out <dir> [--model NAME]    write the driver's PPD files
           testpdf --out <file> [--size NAME] [--pages N] [--gray yes]
                                             write a calibration page as PDF
